@@ -1,4 +1,6 @@
 import cupy
+
+import numpy as np
 from tqdm import tqdm
 
 from utils import Layer, FLOAT_TYPE
@@ -106,7 +108,7 @@ class Network:
                 loss += criterion.loss(y_hat, y)
                 correct += cupy.equal(cupy.argmax(y_hat, axis = -1), y).astype(cupy.int32).sum()
 
-            print("epoch:", i + 1, "loss:", loss / len(labels), "accuracy:", correct / len(labels), "\n")
+            print("epoch:", i + 1, "loss:", loss / np.prod(labels.shape), "accuracy:", correct / np.prod(labels.shape), "\n")
 
     def evaluate(self, test_data, test_labels, criterion, batch_size = 64):
 
@@ -122,4 +124,4 @@ class Network:
             loss += criterion.loss(y_hat, y)
             correct += cupy.equal(cupy.argmax(y_hat, axis = -1), y).astype(cupy.int32).sum()
 
-        return loss / len(test_data), correct / len(test_data)
+        return loss / np.prod(test_labels.shape), correct / np.prod(test_labels.shape)
