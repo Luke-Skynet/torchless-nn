@@ -18,16 +18,16 @@ class VitProjector(Layer):
         self.sequence_length = self.patches_height * self.patches_width
         self.token_dim = self.patch_size[0] * self.patch_size[1] * self.channels
         self.embedding_dim = embedding_dim
-        self.num_latents = num_latents
+        self.cls_lat_size = 1 + num_latents
 
         self.tokens = None
         self.embeddings = None
 
         self.projection     = init_random_tensor((self.token_dim, self.embedding_dim)) / self.token_dim**0.5
-        self.cls_lat_tokens = init_zeros_tensor((1 + self.num_latents, self.embedding_dim))
+        self.cls_lat_tokens = init_zeros_tensor((self.cls_lat_size, self.embedding_dim))
 
-        pos = cupy.arange(self.sequence_length + 1 + self.num_latents, dtype = FLOAT_TYPE)[:, None]
-        i   = cupy.arange(self.embedding_dim,                          dtype = FLOAT_TYPE)[None, :]
+        pos = cupy.arange(self.sequence_length + self.cls_lat_size, dtype = FLOAT_TYPE)[:, None]
+        i   = cupy.arange(self.embedding_dim,                       dtype = FLOAT_TYPE)[None, :]
 
         self.positional_encoding = pos / 10000**(2 * (i // 2) / self.embedding_dim)
         self.positional_encoding[:, 0::2] = cupy.sin(self.positional_encoding[:, 0::2])
@@ -71,8 +71,8 @@ class VitProjector(Layer):
 
     def backward(self, gradient):
 
-        self.cls_lat_token_grads += gradient[:,1 + self.num_latents,:].mean(axis = 0)
-        gradient = gradient[:,1 + self.num_latents:,:]
+        self.cls_lat_token_grads += gradient[:,:self.cls_lat_size,:].mean(axis = 0)
+        gradient = gradient[:,self.cls_lat_size:,:]
 
         self.projection_grads += cupy.tensordot(self.tokens.transpose(2, 0, 1), gradient, 2) / gradient.shape[0]
         gradient = gradient @ self.projection.transpose()
