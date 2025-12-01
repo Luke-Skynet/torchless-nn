@@ -131,6 +131,7 @@ class VitMLPHead(Layer):
 class GPTEmbedFront(Layer):
 
     def __init__(self, table, context_length):
+        super(GPTEmbedFront, self).__init__()
 
         self.table         = table
         self.table_grads   = init_zeros_tensor(self.table.shape)
@@ -167,6 +168,7 @@ class GPTEmbedFront(Layer):
 class GPTEmbedBack(Layer):
 
     def __init__(self, table):
+        super(GPTEmbedBack, self).__init__()
 
         self.table         = table
         self.table_grads   = init_zeros_tensor(self.table.shape)

@@ -7,7 +7,7 @@ While this library is designed to run on an Nvidia GPU (with tensor cores), all 
 ## Modules
 
 * **activations.py** - ReLU, GeLU Approx, SiLU (Swish), and Softmax activations.
-* **layers.py** - Convolution, MaxPool, Flatten, Dense, Dropout, and Transformer (Layer Norm, Attention, Feed Forward) layers.
+* **layers.py** - Convolution, BatchNorm, MaxPool, AveragePool, Flatten, Dense, Dropout, and Transformer (LayerNorm, Attention, Feed Forward) layers.
 * **network.py** - Network framework class with Cross Entropy loss criterion and AdamW optimization.
 * **transformer_adapters.py** - ViT image to tokens embedding, ViT MLP classification head, GPT embedding and GPT prediction layers.
-* **utils** - Layer interface and tensor initializers to keep all parameters in FP32/TF32.
+* **utils** - Layer interface, Residual Layer wrapper, and tensor initializers to keep all parameters in FP32/TF32.
