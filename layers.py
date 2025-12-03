@@ -78,11 +78,11 @@ class BatchNorm(Layer):
         self.gamma = cupy.ones(num_channels, dtype = FLOAT_TYPE)
         self.beta  = init_zeros_tensor(num_channels)
 
-        self.gamma_grads = init_zeros_tensor(num_channels)
+        self.gamma_grads   = init_zeros_tensor(num_channels)
         self.gamma_moments = init_zeros_tensor(num_channels)
         self.gamma_vars    = init_zeros_tensor(num_channels)
 
-        self.beta_grads  = init_zeros_tensor(num_channels)
+        self.beta_grads   = init_zeros_tensor(num_channels)
         self.beta_moments = init_zeros_tensor(num_channels)
         self.beta_vars    = init_zeros_tensor(num_channels)
 
@@ -204,7 +204,7 @@ class Flatten(Layer):
         super(Flatten, self).__init__()
 
     def forward(self, input):
-        self.input = input
+        self.input  = input
         self.output = self.input.reshape((self.input.shape[0], -1))
         return self.output
 
@@ -234,13 +234,13 @@ class Dense(Layer):
         self.variances  = [self.weight_vars,    self.bias_vars]
 
     def forward(self, input):
-        self.input = input
+        self.input  = input
         self.output = input @ self.weights + self.bias
         return self.output
 
     def backward(self, gradient):
         self.weight_grads += (self.input.transpose() @ gradient) / gradient.shape[0]
-        self.bias_grads += cupy.mean(gradient, (0))
+        self.bias_grads   += cupy.mean(gradient, (0))
         return gradient @ self.weights.transpose()
 
 
@@ -249,7 +249,7 @@ class Dropout(Layer):
         super(Dropout, self).__init__()
         
         self.dropout_rate = dropout_rate
-        self.dropout_rng = cupy.random.default_rng()
+        self.dropout_rng  = cupy.random.default_rng()
         self.droput_neurons = None
     
     def forward(self, input):
@@ -283,7 +283,7 @@ class MultiHeadAttention(Layer):
         self.mask = cupy.where(self.mask == 0, -1e9, 0.0).astype(FLOAT_TYPE, copy = False)
 
         self.query = None
-        self.key   = None
+        self.key_t = None
         self.value = None
 
         self.is_decoder = decoder
@@ -291,11 +291,11 @@ class MultiHeadAttention(Layer):
         self.qkv_weights = init_random_tensor((embedding_dim, 3*embedding_dim)) / embedding_dim**0.5
         self.out_weights = init_random_tensor((embedding_dim,   embedding_dim)) / embedding_dim**0.5
 
-        self.qkv_weight_grads = init_zeros_tensor(self.qkv_weights.shape)
+        self.qkv_weight_grads   = init_zeros_tensor(self.qkv_weights.shape)
         self.qkv_weight_moments = init_zeros_tensor(self.qkv_weights.shape)
         self.qkv_weight_vars    = init_zeros_tensor(self.qkv_weights.shape)
 
-        self.out_weight_grads = init_zeros_tensor(self.out_weights.shape)
+        self.out_weight_grads   = init_zeros_tensor(self.out_weights.shape)
         self.out_weight_moments = init_zeros_tensor(self.out_weights.shape)
         self.out_weight_vars    = init_zeros_tensor(self.out_weights.shape)
 
@@ -337,7 +337,7 @@ class MultiHeadAttention(Layer):
 
         B, T, C = gradient.shape
 
-        self.out_weight_grads = cupy.tensordot(self.heads_out.transpose(2, 0, 1), gradient, 2) / B
+        self.out_weight_grads += cupy.tensordot(self.heads_out.transpose(2, 0, 1), gradient, 2) / B
         gradient = gradient @ self.out_weights.transpose()
 
         gradient = gradient.reshape((B, T, self.num_heads, self.heads_dim)).transpose(0, 2, 1, 3)
