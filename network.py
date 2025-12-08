@@ -49,11 +49,11 @@ class Network:
             gradient = layer.backward(gradient)
         return gradient
 
-    def set_eval(self, eval_mode = True):
+    def set_eval(self, eval_mode):
         for layer in self.layers:
-            layer.zero_grad()
             layer.set_eval(eval_mode)
-
+            layer.zero_grad()
+            
     def _zero_grad(self):
         for layer in self.layers:
             layer.zero_grad()
@@ -84,34 +84,60 @@ class Network:
 
                 param -= learning_rate * (mom_hat / (var_hat**0.5 + 1e-7) + lmda * param)
 
-    def train(self, data, labels, criterion, epochs = 1, batch_size = 64, learning_rate = 0.001, weight_decay = 0.01):
-    
-        t = 1
-        for i in range(epochs):
+    def train(self, train_data, train_labels, test_data, test_labels, criterion,
+                    augments = None, epochs = 1, batch_size = 64, batches_per_step = 1,
+                    learning_rate = 0.001, weight_decay = 0.01):
 
-            loss, correct = 0, 0
+        t = 1
+
+        for i in range(epochs):
             
-            for j in tqdm(range(0, len(data), batch_size)):
+            self.set_eval(False)
+            self._zero_grad()
+
+            steps = 1
+            train_loss, train_correct = 0, 0
+
+            shuffle = np.random.permutation(len(train_labels))
+
+            train_data   = train_data[shuffle]
+            train_labels = train_labels[shuffle]
+
+            for j in tqdm(range(0, len(train_data), batch_size)):
                 
-                x = cupy.array(data  [j: min(j + batch_size, len(data))])
-                y = cupy.array(labels[j: min(j + batch_size, len(data))])
+                x = train_data  [j: min(j + batch_size, len(train_data))]
+                y = train_labels[j: min(j + batch_size, len(train_data))]
                 
-                self._zero_grad()
+                if augments is not None:
+                    x = augments(x)
+
+                x = cupy.array(x)
+                y = cupy.array(y)
                 
                 y_hat = self._forward(x)
                 grad = criterion.gradients(y_hat, y)
 
                 self._backward(grad)
-                self._update(learning_rate, weight_decay, t,)
-                t += 1
+                
+                if steps % batches_per_step == 0:
+                    self._update(learning_rate, weight_decay, t)
+                    self._zero_grad()
+                    t += 1
 
-                loss += criterion.loss(y_hat, y)
-                correct += cupy.equal(cupy.argmax(y_hat, axis = -1), y).astype(cupy.int32).sum()
-
-            print("epoch:", i + 1, "loss:", loss / np.prod(labels.shape), "accuracy:", correct / np.prod(labels.shape), "\n")
+                train_loss += criterion.loss(y_hat, y)
+                train_correct += cupy.equal(cupy.argmax(y_hat, axis = -1), y).astype(cupy.int32).sum()
+                steps += 1
+                
+            train_loss  = train_loss / np.prod(train_labels.shape)
+            train_accuracy = train_correct / np.prod(train_labels.shape)
+            print("epoch:", i + 1, "train loss:", train_loss, "train accuracy:", train_accuracy)
+            
+            test_loss, test_accuracy = self.evaluate(test_data, test_labels, criterion, batch_size=batch_size)
+            print("epoch:", i + 1, "test loss:", test_loss, "test accuracy:", test_accuracy, "\n")
 
     def evaluate(self, test_data, test_labels, criterion, batch_size = 64):
-
+        
+        self.set_eval(True)
         loss, correct = 0, 0
 
         for i in tqdm(range(0, len(test_data), batch_size)):

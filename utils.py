@@ -1,8 +1,12 @@
 import cupy
+import numpy as np
+import cv2
 
 global FLOAT_TYPE 
 FLOAT_TYPE = cupy.float32 # (TF32 enabled)
 
+
+# tensor initialization with float type
 
 def init_random_tensor(size):
     rng = cupy.random.default_rng()
@@ -10,6 +14,9 @@ def init_random_tensor(size):
 
 def init_zeros_tensor(size):
     return cupy.zeros(size, dtype = FLOAT_TYPE)
+
+
+# layer interface and residual layer wrapper
 
 class Layer:
 
@@ -61,7 +68,6 @@ class Residual(Layer):
             self.moments    = self.moments    + layer.moments
             self.variances  = self.variances  + layer.variances
         
-    
     def forward(self, input):
         
         self.input = input
@@ -78,8 +84,8 @@ class Residual(Layer):
     
     def backward(self, gradient):
         
-        nabla    = gradient if self.mode == "add" else gradient[:,:,:,self.input.shape[-1]:]
         gradient = gradient if self.mode == "add" else gradient[:,:,:,:self.input.shape[-1]]
+        nabla    = gradient if self.mode == "add" else gradient[:,:,:,self.input.shape[-1]:]
         
         for layer in reversed(self.layers):
             nabla = layer.backward(nabla)
@@ -90,3 +96,47 @@ class Residual(Layer):
     def set_eval(self, eval_mode):
         for layer in self.layers:
             layer.set_eval(eval_mode)
+            
+
+# crude augments from scratch
+
+def random_flip(data):
+    indices = np.random.choice(np.arange(0, len(data)), size = len(data) // 2)
+    data[indices] = np.flip(data[indices], axis = 2)
+    return data
+    
+def random_shift(data):
+    
+    x_shifts = np.random.choice(np.arange(0,9),  size = len(data))
+    y_shifts = np.random.choice(np.arange(0,9),  size = len(data))
+    
+    x_res = data.shape[1]
+    y_res = data.shape[2]
+
+    for i, (img, dx, dy) in enumerate(zip(data, x_shifts, y_shifts)):
+        cropped = np.pad(img, ((4,4), (4,4), (0,0)))
+        cropped = cropped[dx:x_res+dx, dy:y_res+dy,:]
+        data[i] = cropped
+    
+    return data
+
+
+def random_rotate(data):
+    
+    x_res = data.shape[1]
+    y_res = data.shape[2]
+    
+    mid = (x_res // 2, y_res // 2)
+
+    angles = np.random.randint(-15, 16, len(data))
+    
+    for i, (img, angle) in enumerate(zip(data, angles)):
+        matrix  = cv2.getRotationMatrix2D(mid, angle, 1.0)
+        data[i] = cv2.warpAffine(img, matrix, (x_res, y_res))
+    
+    return data
+
+
+def augment_images(data):
+    x = data.copy()
+    return random_shift(random_rotate(random_flip(x)))
