@@ -64,4 +64,4 @@ class SoftMax(Layer):
         return self.output
 
     def backward(self, gradient):
-        return gradient
+        return gradient # handled by Cross Entropy Loss

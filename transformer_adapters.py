@@ -5,7 +5,7 @@ from utils import Layer, FLOAT_TYPE, init_random_tensor, init_zeros_tensor
 
 class VitProjector(Layer):
 
-    def __init__(self, input_size:tuple, patch_size:tuple, embedding_dim, num_latents = 0):
+    def __init__(self, input_size:tuple, patch_size:tuple, embedding_dim, num_registers = 0):
         super(VitProjector, self).__init__()
 
         self.batch_size = 0
@@ -18,15 +18,15 @@ class VitProjector(Layer):
         self.sequence_length = self.patches_height * self.patches_width
         self.token_dim = self.patch_size[0] * self.patch_size[1] * self.channels
         self.embedding_dim = embedding_dim
-        self.cls_lat_size = 1 + num_latents
+        self.cls_reg_size = 1 + num_registers
 
         self.tokens = None
         self.embeddings = None
 
         self.projection     = init_random_tensor((self.token_dim, self.embedding_dim)) / self.token_dim**0.5
-        self.cls_lat_tokens = init_zeros_tensor((self.cls_lat_size, self.embedding_dim))
+        self.cls_reg_tokens = init_random_tensor((self.cls_reg_size, self.embedding_dim)) / self.embedding_dim**0.5
 
-        pos = cupy.arange(self.sequence_length + self.cls_lat_size, dtype = FLOAT_TYPE)[:, None]
+        pos = cupy.arange(self.sequence_length + self.cls_reg_size, dtype = FLOAT_TYPE)[:, None]
         i   = cupy.arange(self.embedding_dim,                       dtype = FLOAT_TYPE)[None, :]
 
         self.positional_encoding = pos / 10000**(2 * (i // 2) / self.embedding_dim)
@@ -36,15 +36,15 @@ class VitProjector(Layer):
         self.projection_grads   = init_zeros_tensor(self.projection.shape)
         self.projection_moments = init_zeros_tensor(self.projection.shape)
         self.projection_vars    = init_zeros_tensor(self.projection.shape)
-        
-        self.cls_lat_token_grads   = init_zeros_tensor(self.cls_lat_tokens.shape)
-        self.cls_lat_token_moments = init_zeros_tensor(self.cls_lat_tokens.shape)
-        self.cls_lat_token_vars    = init_zeros_tensor(self.cls_lat_tokens.shape)
 
-        self.parameters = [self.projection,         self.cls_lat_tokens]
-        self.gradients  = [self.projection_grads,   self.cls_lat_token_grads]
-        self.moments    = [self.projection_moments, self.cls_lat_token_moments]
-        self.variances  = [self.projection_vars,    self.cls_lat_token_vars]
+        self.cls_reg_token_grads   = init_zeros_tensor(self.cls_reg_tokens.shape)
+        self.cls_reg_token_moments = init_zeros_tensor(self.cls_reg_tokens.shape)
+        self.cls_reg_token_vars    = init_zeros_tensor(self.cls_reg_tokens.shape)
+
+        self.parameters = [self.projection,         self.cls_reg_tokens]
+        self.gradients  = [self.projection_grads,   self.cls_reg_token_grads]
+        self.moments    = [self.projection_moments, self.cls_reg_token_moments]
+        self.variances  = [self.projection_vars,    self.cls_reg_token_vars]
 
     def forward(self, input):
 
@@ -63,7 +63,7 @@ class VitProjector(Layer):
 
         self.embeddings = self.tokens @ self.projection
 
-        class_token_batch = cupy.tile(self.cls_lat_tokens, (self.batch_size, 1, 1))
+        class_token_batch = cupy.tile(self.cls_reg_tokens, (self.batch_size, 1, 1))
         self.embeddings = cupy.concatenate([class_token_batch, self.embeddings], axis = 1)
 
         self.output = self.embeddings + self.positional_encoding
@@ -71,8 +71,8 @@ class VitProjector(Layer):
 
     def backward(self, gradient):
 
-        self.cls_lat_token_grads += gradient[:,:self.cls_lat_size,:].mean(axis = 0)
-        gradient = gradient[:,self.cls_lat_size:,:]
+        self.cls_reg_token_grads += gradient[:,:self.cls_reg_size,:].mean(axis = 0)
+        gradient = gradient[:,self.cls_reg_size:,:]
 
         self.projection_grads += cupy.tensordot(self.tokens.transpose(2, 0, 1), gradient, 2) / gradient.shape[0]
         gradient = gradient @ self.projection.transpose()

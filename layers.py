@@ -267,7 +267,7 @@ class Dropout(Layer):
             gradient *= self.dropout_neurons
         return gradient
 
-
+# TODO add GQA option and switch to RoPE
 class MultiHeadAttention(Layer):
 
     def __init__(self, embedding_dim, context_length, num_heads, decoder = False):
@@ -285,7 +285,10 @@ class MultiHeadAttention(Layer):
         self.query = None
         self.key_t = None
         self.value = None
-
+        
+        self.softmax = None
+        self.heads_out = None
+        
         self.is_decoder = decoder
 
         self.qkv_weights = init_random_tensor((embedding_dim, 3*embedding_dim)) / embedding_dim**0.5
@@ -337,7 +340,7 @@ class MultiHeadAttention(Layer):
 
         B, T, C = gradient.shape
 
-        self.out_weight_grads += cupy.tensordot(self.heads_out.transpose(2, 0, 1), gradient, 2) / B
+        self.out_weight_grads += cupy.tensordot(self.heads_out.transpose(2, 0, 1), gradient, 2) / (B * T)
         gradient = gradient @ self.out_weights.transpose()
 
         gradient = gradient.reshape((B, T, self.num_heads, self.heads_dim)).transpose(0, 2, 1, 3)
@@ -357,79 +360,75 @@ class MultiHeadAttention(Layer):
 
         gradient = cupy.concatenate((query_grads, key_t_grads, value_grads), axis = 2)
 
-        self.qkv_weight_grads += cupy.tensordot(self.input.transpose(2, 0, 1), gradient, 2) / B
+        self.qkv_weight_grads += cupy.tensordot(self.input.transpose(2, 0, 1), gradient, 2) / (B * T)
         return gradient @ self.qkv_weights.transpose()
 
 
-class ChannelFeedForward(Layer):
+class GatedFeedForward(Layer):
 
-    def __init__(self, input_channels, output_channels, activation, dropout_rate = 0.0):
-        super(ChannelFeedForward, self).__init__()
-
-        self.input_channels = input_channels
-        self.output_channels = output_channels
+    def __init__(self, num_channels, activation, dropout_rate = 0.0):
+        super(GatedFeedForward, self).__init__()
         
-        self.activation:Layer = activation
+        self.activation:Layer = activation()
         self.dropout = Dropout(dropout_rate)
+        
+        self.act_output = None
+        self.gate_output = None
         self.hidden_output = None
 
-        self.weights1 = init_random_tensor((input_channels,  4*output_channels)) / input_channels**0.5
-        self.bias1    = init_zeros_tensor(4*output_channels)
-
-        self.weights2 = init_random_tensor((4*output_channels, output_channels)) / (4*output_channels)**0.5
-        self.bias2    = init_zeros_tensor(output_channels)
+        self.weights1 = init_random_tensor((  num_channels, 4*num_channels)) /    num_channels**0.5
+        self.weights2 = init_random_tensor((  num_channels, 4*num_channels)) /    num_channels**0.5
+        self.weights3 = init_random_tensor((4*num_channels,   num_channels)) / (4*num_channels)**0.5
 
         self.weight_grads1   = init_zeros_tensor(self.weights1.shape)
         self.weight_moments1 = init_zeros_tensor(self.weights1.shape)
         self.weight_vars1    = init_zeros_tensor(self.weights1.shape)
 
-        self.bias_grads1   = init_zeros_tensor(self.bias1.shape)
-        self.bias_moments1 = init_zeros_tensor(self.bias1.shape)
-        self.bias_vars1    = init_zeros_tensor(self.bias1.shape)
-
         self.weight_grads2   = init_zeros_tensor(self.weights2.shape)
         self.weight_moments2 = init_zeros_tensor(self.weights2.shape)
         self.weight_vars2    = init_zeros_tensor(self.weights2.shape)
+        
+        self.weight_grads3   = init_zeros_tensor(self.weights3.shape)
+        self.weight_moments3 = init_zeros_tensor(self.weights3.shape)
+        self.weight_vars3    = init_zeros_tensor(self.weights3.shape)
 
-        self.bias_grads2   = init_zeros_tensor(self.bias2.shape)
-        self.bias_moments2 = init_zeros_tensor(self.bias2.shape)
-        self.bias_vars2    = init_zeros_tensor(self.bias2.shape)
-
-
-        self.parameters = [self.weights1,        self.bias1,         self.weights2,        self.bias2]
-        self.gradients  = [self.weight_grads1,   self.bias_grads1,   self.weight_grads2,   self.bias_grads2]
-        self.moments    = [self.weight_moments1, self.bias_moments1, self.weight_moments2, self.bias_moments2]
-        self.variances  = [self.weight_vars1,    self.bias_vars1,    self.weight_vars2,    self.bias_vars2]
+        self.parameters = [self.weights1,        self.weights2,        self.weights3]
+        self.gradients  = [self.weight_grads1,   self.weight_grads2,   self.weight_grads3]
+        self.moments    = [self.weight_moments1, self.weight_moments2, self.weight_moments3]
+        self.variances  = [self.weight_vars1,    self.weight_vars2,    self.weight_vars3]
 
 
     def forward(self, input):
 
         self.input = input
-
-        self.hidden_output = self.activation.forward(self.input @ self.weights1 + self.bias1)
-        self.hidden_output = self.dropout.forward(self.hidden_output)
         
-        self.output = self.hidden_output @ self.weights2 + self.bias2
+        self.act_output = self.activation.forward(self.input @ self.weights1)
+        self.gate_output = self.input @ self.weights2
+        
+        self.hidden_output = self.dropout.forward(self.act_output * self.gate_output)
+        self.output = self.hidden_output @ self.weights3
 
         return self.output
 
     def backward(self, gradient):
-
-        self.weight_grads2 += cupy.tensordot(self.hidden_output.transpose(2, 0, 1), gradient, 2) / (gradient.shape[0])
-        self.bias_grads2  += cupy.mean(gradient, (0, 1))
         
-        gradient = self.dropout.backward(gradient @ self.weights2.transpose())
-        gradient = self.activation.backward(gradient)
+        B, T, _ = gradient.shape
 
-        self.weight_grads1 += cupy.tensordot(self.input.transpose(2, 0, 1), gradient, 2) / (gradient.shape[0])
-        self.bias_grads1  += cupy.mean(gradient, (0, 1))
+        self.weight_grads3 += cupy.tensordot(self.hidden_output.transpose(2, 0, 1), gradient, 2) / (B * T)
+        
+        gradient = self.dropout.backward(gradient @ self.weights3.transpose())
+        act_gradient = self.activation.backward(gradient * self.gate_output)
+        gate_gradient = gradient * self.act_output
 
-        return gradient @ self.weights1.transpose()
+        self.weight_grads1 += cupy.tensordot(self.input.transpose(2, 0, 1), act_gradient,  2) / (B * T)
+        self.weight_grads2 += cupy.tensordot(self.input.transpose(2, 0, 1), gate_gradient, 2) / (B * T)
+
+        return act_gradient @ self.weights1.transpose() + gate_gradient @ self.weights2.transpose()
 
     def set_eval(self, eval_mode):
         self.dropout.set_eval(eval_mode)
 
-
+# TODO: Add RMSnorm
 class LayerNorm(Layer):
 
     def __init__(self, num_channels):
@@ -477,8 +476,8 @@ class LayerNorm(Layer):
 
     def backward(self, gradient):
 
-        self.gamma_grads += cupy.sum(gradient * self.normed, axis=(0, 1)) / gradient.shape[0]
-        self.beta_grads  += cupy.sum(gradient, axis=(0, 1)) / gradient.shape[0]
+        self.gamma_grads += cupy.mean(gradient * self.normed, axis=(0, 1))
+        self.beta_grads  += cupy.mean(gradient, axis=(0, 1))
 
         gradient = gradient * self.gamma
         
@@ -496,7 +495,7 @@ class TransformerBlock(Layer):
         self.attn_block = MultiHeadAttention(embed_dim, context_length, num_heads, decoder = decoder)
 
         self.pre_ffn_norm = LayerNorm(embed_dim)
-        self.ffn = ChannelFeedForward(embed_dim, embed_dim, activation, dropout_rate = dropout_rate)
+        self.ffn = GatedFeedForward(embed_dim, activation, dropout_rate = dropout_rate)
 
         self.parameters = [*self.pre_attn_norm.parameters, *self.attn_block.parameters, *self.pre_ffn_norm.parameters, *self.ffn.parameters]
         self.gradients  = [*self.pre_attn_norm.gradients,  *self.attn_block.gradients,  *self.pre_ffn_norm.gradients,  *self.ffn.gradients]
@@ -504,7 +503,6 @@ class TransformerBlock(Layer):
         self.variances  = [*self.pre_attn_norm.variances,  *self.attn_block.variances,  *self.pre_ffn_norm.variances,  *self.ffn.variances]
 
     def forward(self,input):
-
         self.input  = input
         self.output = self.input  + self.attn_block.forward(self.pre_attn_norm.forward(self.input))
         self.output = self.output + self.ffn.forward(self.pre_ffn_norm.forward(self.output))
