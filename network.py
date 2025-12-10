@@ -10,25 +10,16 @@ from transformer_adapters import *
 
 class CrossEntropy:
 
-    def __init__(self, num_classes = -1):
-        self.one_hot = None
-        if num_classes > 0:
-            self.one_hot = cupy.eye(num_classes, dtype = FLOAT_TYPE)
+    def __init__(self, num_classes):
+        self.one_hot = cupy.eye(num_classes, dtype = FLOAT_TYPE)
 
-    def gradients(self, output, labels):
-        if self.one_hot is not None:
-            return output - self.one_hot[labels]
-        else:
-            one_hot = cupy.eye(output.shape[-1], dtype = FLOAT_TYPE)
-            return output - one_hot(labels)
+    def gradients(self, logits, labels):
+        return logits - self.one_hot[labels] # Combined Softmax + Cross Entropy Loss
       
-    def loss(self, output, labels):
-        if self.one_hot is not None:
-            labels = self.one_hot[labels]
-        else:
-            one_hot = cupy.eye(output.shape[-1], dtype = FLOAT_TYPE)
-            labels = one_hot[labels]
-        return -1 * cupy.sum(labels * cupy.log(output + 1e-7))
+    def loss(self, logits, labels):
+        labels = self.one_hot[labels]
+        eta = 1e-7
+        return -1 * cupy.sum(labels * cupy.log(logits + eta))
 
 
 class Network:
