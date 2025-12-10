@@ -49,17 +49,19 @@ class Network:
         for layer in self.layers:
             layer.zero_grad()
 
-    def _update(self, learning_rate, weight_decay, t):
+    def _update(self, learning_rate, weight_decay, t, num_samples):
 
         beta1, beta2 = 0.9, 0.99
 
-        for i, layer in enumerate(self.layers):
+        for layer in self.layers:
             
             for param, grad, moment, variance in zip(layer.parameters,
                                                      layer.gradients,
                                                      layer.moments,
                                                      layer.variances):
+                grad /= num_samples
                 lmda = weight_decay 
+                
                 if len(param.shape) == 1 or isinstance(layer, (VitProjector, VitMLPHead, 
                                                                GPTEmbedFront, GPTEmbedBack)):
                     lmda = 0.0
@@ -75,22 +77,21 @@ class Network:
 
                 param -= learning_rate * (mom_hat / (var_hat**0.5 + 1e-7) + lmda * param)
 
-    def train(self, train_data, train_labels, test_data, test_labels, criterion,
+    def train(self, criterion, train_data, train_labels, test_data = None, test_labels = None,
                     augments = None, epochs = 1, batch_size = 64, batches_per_step = 1,
                     learning_rate = 0.001, weight_decay = 0.01):
 
-        t = 1
-
+        step_count = 0
+        samples_per_step = batch_size * batches_per_step
+        
         for i in range(epochs):
             
             self.set_eval(False)
-            self._zero_grad()
 
-            steps = 1
+            batches_seen = 0
             train_loss, train_correct = 0, 0
 
             shuffle = np.random.permutation(len(train_labels))
-
             train_data   = train_data[shuffle]
             train_labels = train_labels[shuffle]
 
@@ -106,25 +107,26 @@ class Network:
                 y = cupy.array(y)
                 
                 y_hat = self._forward(x)
+                
                 grad = criterion.gradients(y_hat, y)
-
                 self._backward(grad)
                 
-                if steps % batches_per_step == 0:
-                    self._update(learning_rate, weight_decay, t)
+                batches_seen += 1
+                if batches_seen % batches_per_step == 0:
+                    step_count += 1
+                    self._update(learning_rate, weight_decay, step_count, samples_per_step)
                     self._zero_grad()
-                    t += 1
 
                 train_loss += criterion.loss(y_hat, y)
                 train_correct += cupy.equal(cupy.argmax(y_hat, axis = -1), y).astype(cupy.int32).sum()
-                steps += 1
                 
-            train_loss  = train_loss / np.prod(train_labels.shape)
+            train_loss     = train_loss    / np.prod(train_labels.shape)
             train_accuracy = train_correct / np.prod(train_labels.shape)
             print("epoch:", i + 1, "train loss:", train_loss, "train accuracy:", train_accuracy)
             
-            test_loss, test_accuracy = self.evaluate(test_data, test_labels, criterion, batch_size=batch_size)
-            print("epoch:", i + 1, "test loss:", test_loss, "test accuracy:", test_accuracy, "\n")
+            if test_data is not None and test_labels is not None:
+                test_loss, test_accuracy = self.evaluate(test_data, test_labels, criterion, batch_size=batch_size)
+                print("epoch:", i + 1, "test loss:", test_loss, "test accuracy:", test_accuracy, "\n")
 
     def evaluate(self, test_data, test_labels, criterion, batch_size = 64):
         

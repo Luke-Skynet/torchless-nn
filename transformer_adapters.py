@@ -71,10 +71,10 @@ class VitProjector(Layer):
 
     def backward(self, gradient):
 
-        self.cls_reg_token_grads += gradient[:,:self.cls_reg_size,:].mean(axis = 0)
+        self.cls_reg_token_grads += gradient[:,:self.cls_reg_size,:].sum(axis = 0)
         gradient = gradient[:,self.cls_reg_size:,:]
 
-        self.projection_grads += cupy.tensordot(self.tokens.transpose(2, 0, 1), gradient, 2) / gradient.shape[0]
+        self.projection_grads += cupy.tensordot(self.tokens.transpose(2, 0, 1), gradient, 2) / gradient.shape[1]
         gradient = gradient @ self.projection.transpose()
 
         gradient = gradient.reshape((self.batch_size,
@@ -119,8 +119,8 @@ class VitMLPHead(Layer):
 
     def backward(self, gradient):
 
-        self.weight_grads += (self.class_tokens.transpose() @ gradient) / gradient.shape[0]
-        self.bias_grads += cupy.average(gradient, (0))
+        self.weight_grads += self.class_tokens.transpose() @ gradient
+        self.bias_grads += cupy.sum(gradient, axis = 0)
 
         gradient = gradient @ self.weights.transpose()
         gradient = gradient[:,cupy.newaxis,:]
@@ -161,7 +161,7 @@ class GPTEmbedFront(Layer):
         return self.output
 
     def backward(self, gradient):
-        self.table_grads += cupy.tensordot(self.one_hot_inputs.transpose(2, 0, 1), gradient, 2) / gradient.shape[0]
+        self.table_grads += cupy.tensordot(self.one_hot_inputs.transpose(2, 0, 1), gradient, 2) / gradient.shape[1]
         return gradient @ self.table.transpose()
 
 
@@ -186,5 +186,5 @@ class GPTEmbedBack(Layer):
         return self.output
 
     def backward(self, gradient):
-        self.table_grads += cupy.tensordot(self.input.transpose(2, 0, 1), gradient, 2).transpose() / gradient.shape[0]
+        self.table_grads += cupy.tensordot(self.input.transpose(2, 0, 1), gradient, 2).transpose() / gradient.shape[1]
         return gradient @ self.table

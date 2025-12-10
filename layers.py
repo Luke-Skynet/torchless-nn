@@ -46,9 +46,9 @@ class Convolution(Layer):
     def backward(self, gradient):
 
         conv_in = cupy.lib.stride_tricks.sliding_window_view(self.padded_input, self.output_dims, (2, 3))
-        self.weight_grads += cupy.einsum("ncklhw,nohw->ockl", conv_in, gradient) / gradient.shape[0]
+        self.weight_grads += cupy.einsum("ncklhw,nohw->ockl", conv_in, gradient) / (self.output_dims[0] * self.output_dims[1])
 
-        self.bias_grads += cupy.sum(gradient, axis=(0, 2, 3), keepdims = True) / gradient.shape[0]
+        self.bias_grads += cupy.sum(gradient, axis = 0, keepdims = True).mean(axis = (2, 3), keepdims = True)
 
         grad_pad_h = self.kernel_size[0] - 1
         grad_pad_w = self.kernel_size[1] - 1
@@ -120,8 +120,8 @@ class BatchNorm(Layer):
             
     def backward(self, gradient):
         
-        self.gamma_grads += cupy.sum(gradient * self.normed, axis=(0, 2, 3), keepdims = True) / gradient.shape[0]
-        self.beta_grads  += cupy.sum(gradient, axis=(0, 2, 3), keepdims = True) / gradient.shape[0]
+        self.gamma_grads += cupy.sum(gradient * self.normed, axis = 0, keepdims = True).mean(axis = (2, 3), keepdims = True)
+        self.beta_grads  += cupy.sum(gradient,               axis = 0, keepdims = True).mean(axis = (2, 3), keepdims = True)
         
         gradient = gradient * self.gamma
         
@@ -238,8 +238,8 @@ class Dense(Layer):
         return self.output
 
     def backward(self, gradient):
-        self.weight_grads += (self.input.transpose() @ gradient) / gradient.shape[0]
-        self.bias_grads   += cupy.mean(gradient, (0))
+        self.weight_grads += self.input.transpose() @ gradient
+        self.bias_grads   += cupy.sum(gradient, axis = 0)
         return gradient @ self.weights.transpose()
 
 
@@ -339,7 +339,7 @@ class MultiHeadAttention(Layer):
 
         B, T, C = gradient.shape
 
-        self.out_weight_grads += cupy.tensordot(self.heads_out.transpose(2, 0, 1), gradient, 2) / (B * T)
+        self.out_weight_grads += cupy.tensordot(self.heads_out.transpose(2, 0, 1), gradient, 2) / T
         gradient = gradient @ self.out_weights.transpose()
 
         gradient = gradient.reshape((B, T, self.num_heads, self.heads_dim)).transpose(0, 2, 1, 3)
@@ -359,7 +359,7 @@ class MultiHeadAttention(Layer):
 
         gradient = cupy.concatenate((query_grads, key_t_grads, value_grads), axis = 2)
 
-        self.qkv_weight_grads += cupy.tensordot(self.input.transpose(2, 0, 1), gradient, 2) / (B * T)
+        self.qkv_weight_grads += cupy.tensordot(self.input.transpose(2, 0, 1), gradient, 2) / T
         return gradient @ self.qkv_weights.transpose()
 
 
@@ -411,16 +411,16 @@ class GatedFeedForward(Layer):
 
     def backward(self, gradient):
         
-        B, T, _ = gradient.shape
+        B, T, C = gradient.shape
 
-        self.weight_grads3 += cupy.tensordot(self.hidden_output.transpose(2, 0, 1), gradient, 2) / (B * T)
+        self.weight_grads3 += cupy.tensordot(self.hidden_output.transpose(2, 0, 1), gradient, 2) / T
         
         gradient = self.dropout.backward(gradient @ self.weights3.transpose())
         act_gradient = self.activation.backward(gradient * self.gate_output)
         gate_gradient = gradient * self.act_output
 
-        self.weight_grads1 += cupy.tensordot(self.input.transpose(2, 0, 1), act_gradient,  2) / (B * T)
-        self.weight_grads2 += cupy.tensordot(self.input.transpose(2, 0, 1), gate_gradient, 2) / (B * T)
+        self.weight_grads1 += cupy.tensordot(self.input.transpose(2, 0, 1), act_gradient,  2) / T
+        self.weight_grads2 += cupy.tensordot(self.input.transpose(2, 0, 1), gate_gradient, 2) / T
 
         return act_gradient @ self.weights1.transpose() + gate_gradient @ self.weights2.transpose()
 
@@ -474,9 +474,11 @@ class LayerNorm(Layer):
         return self.output
 
     def backward(self, gradient):
+        
+        B, T, C = gradient.shape
 
-        self.gamma_grads += cupy.mean(gradient * self.normed, axis=(0, 1))
-        self.beta_grads  += cupy.mean(gradient, axis=(0, 1))
+        self.gamma_grads += cupy.sum(gradient * self.normed, axis=(0, 1)) / T
+        self.beta_grads  += cupy.sum(gradient, axis=(0, 1)) / T
 
         gradient = gradient * self.gamma
         
