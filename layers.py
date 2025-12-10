@@ -4,19 +4,19 @@ from utils import Layer, FLOAT_TYPE, init_random_tensor, init_zeros_tensor
 
 class Convolution(Layer):
 
-    def __init__(self, input_size: tuple, kernel_size: tuple, num_kernels, padding = (0, 0)):
+    def __init__(self, input_dim: tuple, num_kernels:int, kernel_size: tuple, padding = (0, 0)):
         super(Convolution, self).__init__()
 
         self.kernel_size =  kernel_size
-        self.output_dims = (input_size[0] - self.kernel_size[0] + 1 + 2*padding[0],
-                            input_size[1] - self.kernel_size[1] + 1 + 2*padding[1])
+        self.output_dims = (input_dim[1] + 2*padding[0] + 1 - self.kernel_size[0],
+                            input_dim[2] + 2*padding[1] + 1 - self.kernel_size[1])
         
         self.pad_h, self.pad_w = padding
         self.padded_input = None
 
-        self.weights = init_random_tensor((kernel_size[0], kernel_size[1], input_size[2], num_kernels))
-        self.weights = self.weights / (input_size[2] * kernel_size[0] * kernel_size[1])**0.5
-        self.bias    = init_zeros_tensor(num_kernels)
+        self.weights = init_random_tensor((num_kernels, input_dim[0], kernel_size[0], kernel_size[1]))
+        self.weights = self.weights / (input_dim[0] * kernel_size[0] * kernel_size[1])**0.5
+        self.bias    = init_zeros_tensor(num_kernels).reshape(1, num_kernels, 1, 1)
         
         self.weight_grads   = init_zeros_tensor(self.weights.shape)
         self.weight_moments = init_zeros_tensor(self.weights.shape)
@@ -35,30 +35,30 @@ class Convolution(Layer):
 
         self.input = input
         
-        self.padded_input = cupy.pad(self.input, ((0, 0), (self.pad_h, self.pad_h), (self.pad_w, self.pad_w), (0, 0)))
+        self.padded_input = cupy.pad(self.input, ((0, 0), (0, 0), (self.pad_h, self.pad_h), (self.pad_w, self.pad_w)))
 
-        self.output = cupy.lib.stride_tricks.sliding_window_view(self.padded_input, self.kernel_size, (1, 2))
-        self.output = cupy.tensordot(self.output, self.weights, axes=((4, 5, 3), (0, 1, 2)))
+        self.output = cupy.lib.stride_tricks.sliding_window_view(self.padded_input, self.kernel_size, (2, 3))
+        self.output = cupy.einsum("nchwkl,ockl->nohw", self.output, self.weights)
         self.output = self.output + self.bias
 
         return self.output
 
     def backward(self, gradient):
 
-        convolve = cupy.lib.stride_tricks.sliding_window_view(self.padded_input, self.output_dims, (1, 2))
-        self.weight_grads += cupy.tensordot(convolve, gradient, axes=((0, 4, 5), (0, 1, 2))) / gradient.shape[0]
+        conv_in = cupy.lib.stride_tricks.sliding_window_view(self.padded_input, self.output_dims, (2, 3))
+        self.weight_grads += cupy.einsum("ncklhw,nohw->ockl", conv_in, gradient) / gradient.shape[0]
 
-        self.bias_grads += cupy.mean(gradient, axis=(0, 1, 2))
+        self.bias_grads += cupy.sum(gradient, axis=(0, 2, 3), keepdims = True) / gradient.shape[0]
 
         grad_pad_h = self.kernel_size[0] - 1
         grad_pad_w = self.kernel_size[1] - 1
 
-        flipped_weights = cupy.flip(self.weights, axis=(0,1))
+        flipped_weights = cupy.flip(self.weights, axis=(2, 3))
 
-        gradient = cupy.pad(gradient, ((0, 0), (grad_pad_h, grad_pad_h), (grad_pad_w, grad_pad_w), (0, 0)))
-        gradient = cupy.lib.stride_tricks.sliding_window_view(gradient, self.kernel_size, (1, 2))
-        gradient = cupy.tensordot(gradient, flipped_weights, axes=((4, 5, 3), (0, 1, 3)))
-        gradient = gradient[:, self.pad_h:gradient.shape[1]-self.pad_h, self.pad_w:gradient.shape[2]-self.pad_w, :]
+        gradient = cupy.pad(gradient, ((0, 0), (0, 0), (grad_pad_h, grad_pad_h), (grad_pad_w, grad_pad_w)))
+        gradient = cupy.lib.stride_tricks.sliding_window_view(gradient, self.kernel_size, (2, 3))
+        gradient = cupy.einsum("nohwkl,ockl->nchw", gradient, flipped_weights)
+        gradient = gradient[:, :, self.pad_h:gradient.shape[2]-self.pad_h, self.pad_w:gradient.shape[3]-self.pad_w]
         
         return gradient
 
@@ -72,19 +72,19 @@ class BatchNorm(Layer):
         
         self.momentum = 0.1
         
-        self.running_mean = init_zeros_tensor((1, 1, 1, num_channels))
-        self.running_var  = init_zeros_tensor((1, 1, 1, num_channels))
+        self.running_mean = init_zeros_tensor((1, num_channels, 1, 1))
+        self.running_var  = init_zeros_tensor((1, num_channels, 1, 1))
 
-        self.gamma = cupy.ones(num_channels, dtype = FLOAT_TYPE)
-        self.beta  = init_zeros_tensor(num_channels)
+        self.gamma = init_zeros_tensor((1, num_channels, 1, 1)) + 1
+        self.beta  = init_zeros_tensor((1, num_channels, 1, 1))
 
-        self.gamma_grads   = init_zeros_tensor(num_channels)
-        self.gamma_moments = init_zeros_tensor(num_channels)
-        self.gamma_vars    = init_zeros_tensor(num_channels)
+        self.gamma_grads   = init_zeros_tensor(self.gamma.shape)
+        self.gamma_moments = init_zeros_tensor(self.gamma.shape)
+        self.gamma_vars    = init_zeros_tensor(self.gamma.shape)
 
-        self.beta_grads   = init_zeros_tensor(num_channels)
-        self.beta_moments = init_zeros_tensor(num_channels)
-        self.beta_vars    = init_zeros_tensor(num_channels)
+        self.beta_grads   = init_zeros_tensor(self.beta.shape)
+        self.beta_moments = init_zeros_tensor(self.beta.shape)
+        self.beta_vars    = init_zeros_tensor(self.beta.shape)
 
         self.mean = None
         self.var = None
@@ -102,8 +102,8 @@ class BatchNorm(Layer):
         self.input = input
         
         if self.eval_mode is False:
-            self.mean = cupy.mean(input, axis = (0, 1, 2), keepdims = True)
-            self.var  = cupy.var(input, axis = (0, 1, 2), keepdims = True)
+            self.mean = cupy.mean(input, axis = (0, 2, 3), keepdims = True)
+            self.var  = cupy.var(input, axis = (0, 2, 3), keepdims = True)
             self.running_mean = (1 - self.momentum) * self.running_mean + self.momentum * self.mean
             self.running_var  = (1 - self.momentum) * self.running_var  + self.momentum * self.var
         else:
@@ -120,14 +120,14 @@ class BatchNorm(Layer):
             
     def backward(self, gradient):
         
-        self.gamma_grads += cupy.sum(gradient * self.normed, axis=(0, 1, 2)) / gradient.shape[0]
-        self.beta_grads  += cupy.sum(gradient, axis=(0, 1, 2)) / gradient.shape[0]
+        self.gamma_grads += cupy.sum(gradient * self.normed, axis=(0, 2, 3), keepdims = True) / gradient.shape[0]
+        self.beta_grads  += cupy.sum(gradient, axis=(0, 2, 3), keepdims = True) / gradient.shape[0]
         
         gradient = gradient * self.gamma
         
-        gradient_normed = (gradient - cupy.mean(gradient, axis = (0, 1, 2), keepdims = True)) / self.std
+        gradient_normed = (gradient - cupy.mean(gradient, axis = (0, 2, 3), keepdims = True)) / self.std
         
-        return gradient_normed - self.centered * (cupy.mean(gradient * self.centered, axis = (0, 1, 2), keepdims = True) / self.std**3)
+        return gradient_normed - self.centered * (cupy.mean(gradient * self.centered, axis = (0, 2, 3), keepdims = True) / self.std**3)
     
 
 class MaxPool(Layer):
@@ -136,31 +136,31 @@ class MaxPool(Layer):
         super(MaxPool, self).__init__()
 
         self.pool_h, self.pool_w = (pool_height, pool_width)
-        self.batch_size, self.in_h, self.in_w, self.channels = 0,0,0,0
+        self.batch_size, self.channels, self.in_h, self.in_w = 0,0,0,0
         self.mask = None
 
     def forward(self, input):
 
         self.input = input
-        self.batch_size, self.in_h, self.in_w, self.channels = self.input.shape
+        self.batch_size, self.channels, self.in_h, self.in_w = self.input.shape
 
         out_h = self.in_h // self.pool_h
         out_w = self.in_w // self.pool_w
 
-        view = self.input[:, :out_h*self.pool_h, :out_w*self.pool_w, :]
-        view = view.reshape(self.batch_size, out_h, self.pool_h, out_w, self.pool_w, self.channels)
+        view = self.input[:, :, :out_h*self.pool_h, :out_w*self.pool_w]
+        view = view.reshape(self.batch_size, self.channels, out_h, self.pool_h, out_w, self.pool_w)
         
-        self.output = view.max(axis=(2, 4), keepdims = True)
+        self.output = view.max(axis=(3, 5), keepdims = True)
 
         self.mask   = self.output == view
-        self.output = self.output.reshape(self.batch_size, out_h, out_w, self.channels)
+        self.output = self.output.reshape(self.batch_size, self.channels, out_h, out_w)
 
         return self.output
 
     def backward(self, gradient):
-        gradient = gradient[:, :, cupy.newaxis, :, cupy.newaxis, :]
+        gradient = gradient[:, :, :, cupy.newaxis, :, cupy.newaxis]
         gradient = gradient * self.mask
-        gradient = gradient.reshape(self.batch_size, self.in_h, self.in_w, self.channels)
+        gradient = gradient.reshape(self.batch_size, self.channels, self.in_h, self.in_w)
         return gradient
     
 
@@ -170,31 +170,30 @@ class AveragePool(Layer):
         super(AveragePool, self).__init__()
 
         self.pool_h, self.pool_w = (pool_height, pool_width)
-        self.batch_size, self.in_h, self.in_w, self.channels = 0,0,0,0
+        self.batch_size, self.channels, self.in_h, self.in_w = 0,0,0,0
         self.mask = None
 
     def forward(self, input):
 
         self.input = input
-        self.batch_size, self.in_h, self.in_w, self.channels = self.input.shape
-        
+        self.batch_size, self.channels, self.in_h, self.in_w = self.input.shape
+
         out_h = self.in_h // self.pool_h
         out_w = self.in_w // self.pool_w
 
-        view = self.input[:, :out_h*self.pool_h, :out_w*self.pool_w, :]
-        view = view.reshape(self.batch_size, out_h, self.pool_h, out_w, self.pool_w, self.channels)
+        view = self.input[:, :, :out_h*self.pool_h, :out_w*self.pool_w]
+        view = view.reshape(self.batch_size, self.channels, out_h, self.pool_h, out_w, self.pool_w)
         
-        self.output = view.mean(axis=(2, 4), keepdims = True)
+        self.output = view.mean(axis=(3, 5), keepdims = True)
 
         self.mask   = cupy.ones(view.shape) / (self.pool_h * self.pool_w)
-        self.output = self.output.reshape(self.batch_size, out_h, out_w, self.channels)
-
+        self.output = self.output.reshape(self.batch_size, self.channels, out_h, out_w)
         return self.output
 
     def backward(self, gradient):
-        gradient = gradient[:, :, cupy.newaxis, :, cupy.newaxis, :]
+        gradient = gradient[:, :, :, cupy.newaxis, :, cupy.newaxis]
         gradient = gradient * self.mask
-        gradient = gradient.reshape(self.batch_size, self.in_h, self.in_w, self.channels)
+        gradient = gradient.reshape(self.batch_size, self.channels, self.in_h, self.in_w)
         return gradient
 
 
@@ -437,7 +436,7 @@ class LayerNorm(Layer):
         self.channels = num_channels
         self.eps = 1e-5
 
-        self.gamma = cupy.ones(num_channels, dtype = FLOAT_TYPE)
+        self.gamma = init_zeros_tensor(num_channels) + 1
         self.beta  = init_zeros_tensor(num_channels)
 
         self.gamma_grads   = init_zeros_tensor(num_channels)

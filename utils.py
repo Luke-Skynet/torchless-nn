@@ -50,12 +50,13 @@ class Layer:
 
 class Residual(Layer):
     
-    def __init__(self, layers:list[Layer], mode = "add"):
+    def __init__(self, layers:list[Layer], mode = "add", concat_axis = 1):
         super(Residual, self).__init__()
         
         self.layers = layers
         self.mode = mode
         assert self.mode in {"add", "concat"}
+        self.concat_axis = concat_axis
         
         self.parameters = []
         self.gradients  = []
@@ -79,13 +80,14 @@ class Residual(Layer):
         if self.mode == "add":
             self.output = self.input + x
         elif self.mode == "concat":
-            self.output = cupy.concatenate(self.input, x, axis = -1)
+            self.output = cupy.concatenate((self.input, x), axis = self.concat_axis)
         return self.output
     
     def backward(self, gradient):
         
-        gradient = gradient if self.mode == "add" else gradient[:,:,:,:self.input.shape[-1]]
-        nabla    = gradient if self.mode == "add" else gradient[:,:,:,self.input.shape[-1]:]
+        gradient, nabla = (gradient, gradient) if self.mode == "add" else cupy.array_split(gradient, 
+                                                                                           (self.input.shape[self.concat_axis], ),
+                                                                                           axis = self.concat_axis)
         
         for layer in reversed(self.layers):
             nabla = layer.backward(nabla)
@@ -102,7 +104,7 @@ class Residual(Layer):
 
 def random_flip(data):
     indices = np.random.choice(np.arange(0, len(data)), size = len(data) // 2)
-    data[indices] = np.flip(data[indices], axis = 2)
+    data[indices] = np.flip(data[indices], axis = 3)
     return data
     
 def random_shift(data):
@@ -110,12 +112,12 @@ def random_shift(data):
     x_shifts = np.random.choice(np.arange(0,9),  size = len(data))
     y_shifts = np.random.choice(np.arange(0,9),  size = len(data))
     
-    x_res = data.shape[1]
-    y_res = data.shape[2]
+    x_res = data.shape[2]
+    y_res = data.shape[3]
 
     for i, (img, dx, dy) in enumerate(zip(data, x_shifts, y_shifts)):
-        cropped = np.pad(img, ((4,4), (4,4), (0,0)))
-        cropped = cropped[dx:x_res+dx, dy:y_res+dy,:]
+        cropped = np.pad(img, ((0,0), (4,4), (4,4)))
+        cropped = cropped[:, dx:x_res+dx, dy:y_res+dy]
         data[i] = cropped
     
     return data
@@ -123,16 +125,17 @@ def random_shift(data):
 
 def random_rotate(data):
     
-    x_res = data.shape[1]
-    y_res = data.shape[2]
+    x_res = data.shape[2]
+    y_res = data.shape[3]
     
     mid = (x_res // 2, y_res // 2)
 
     angles = np.random.randint(-15, 16, len(data))
     
     for i, (img, angle) in enumerate(zip(data, angles)):
+        img = img.transpose(1, 2, 0)
         matrix  = cv2.getRotationMatrix2D(mid, angle, 1.0)
-        data[i] = cv2.warpAffine(img, matrix, (x_res, y_res))
+        data[i] = cv2.warpAffine(img, matrix, (x_res, y_res)).transpose(2, 0, 1)
     
     return data
 

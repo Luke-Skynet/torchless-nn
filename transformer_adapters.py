@@ -9,7 +9,7 @@ class VitProjector(Layer):
         super(VitProjector, self).__init__()
 
         self.batch_size = 0
-        self.height, self.width, self.channels = input_size
+        self.channels, self.height, self.width = input_size
         self.patch_size = patch_size
 
         self.patches_height = self.height // self.patch_size[0]
@@ -23,7 +23,7 @@ class VitProjector(Layer):
         self.tokens = None
         self.embeddings = None
 
-        self.projection     = init_random_tensor((self.token_dim, self.embedding_dim)) / self.token_dim**0.5
+        self.projection     = init_random_tensor((self.token_dim,    self.embedding_dim)) / self.token_dim**0.5
         self.cls_reg_tokens = init_random_tensor((self.cls_reg_size, self.embedding_dim)) / self.embedding_dim**0.5
 
         pos = cupy.arange(self.sequence_length + self.cls_reg_size, dtype = FLOAT_TYPE)[:, None]
@@ -52,11 +52,11 @@ class VitProjector(Layer):
         self.batch_size = self.input.shape[0]
 
         reshape = self.input.reshape((self.batch_size,
+                                      self.channels,
                                       self.patches_height, self.patch_size[0],
-                                      self.patches_width, self.patch_size[1],
-                                      self.channels))
+                                      self.patches_width, self.patch_size[1]))
 
-        permute = reshape.transpose(0,1,3,2,4,5)
+        permute = reshape.transpose(0,2,4,3,5,1)
         self.tokens = permute.reshape(self.batch_size,
                                       self.sequence_length,
                                       self.token_dim)
@@ -81,8 +81,8 @@ class VitProjector(Layer):
                                      self.patches_height,  self.patches_width,
                                      self.patch_size[0], self.patch_size[1], self.channels))
 
-        gradient = gradient.transpose(0,1,3,2,4,5)
-        gradient = gradient.reshape((self.batch_size, self.height, self.width, self.channels))
+        gradient = gradient.transpose(0, 5, 1, 3, 2, 4)
+        gradient = gradient.reshape((self.batch_size, self.channels, self.height, self.width))
         return gradient
 
 
