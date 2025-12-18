@@ -23,15 +23,9 @@ class VitProjector(Layer):
         self.tokens = None
         self.embeddings = None
 
-        self.projection     = init_random_tensor((self.token_dim,    self.embedding_dim)) / self.token_dim**0.5
-        self.cls_reg_tokens = init_random_tensor((self.cls_reg_size, self.embedding_dim)) / self.embedding_dim**0.5
-
-        pos = cupy.arange(self.sequence_length + self.cls_reg_size, dtype = FLOAT_TYPE)[:, None]
-        i   = cupy.arange(self.embedding_dim,                       dtype = FLOAT_TYPE)[None, :]
-
-        self.positional_encoding = pos / 10000**(2 * (i // 2) / self.embedding_dim)
-        self.positional_encoding[:, 0::2] = cupy.sin(self.positional_encoding[:, 0::2])
-        self.positional_encoding[:, 1::2] = cupy.cos(self.positional_encoding[:, 1::2])
+        self.projection            = init_random_tensor((self.token_dim,    self.embedding_dim)) / self.token_dim**0.5
+        self.cls_reg_tokens        = init_random_tensor((self.cls_reg_size, self.embedding_dim)) / self.embedding_dim**0.5
+        self.positional_embeddings = init_zeros_tensor((self.cls_reg_size + self.sequence_length, self.embedding_dim))
 
         self.projection_grads   = init_zeros_tensor(self.projection.shape)
         self.projection_moments = init_zeros_tensor(self.projection.shape)
@@ -40,11 +34,15 @@ class VitProjector(Layer):
         self.cls_reg_token_grads   = init_zeros_tensor(self.cls_reg_tokens.shape)
         self.cls_reg_token_moments = init_zeros_tensor(self.cls_reg_tokens.shape)
         self.cls_reg_token_vars    = init_zeros_tensor(self.cls_reg_tokens.shape)
-
-        self.parameters = [self.projection,         self.cls_reg_tokens]
-        self.gradients  = [self.projection_grads,   self.cls_reg_token_grads]
-        self.moments    = [self.projection_moments, self.cls_reg_token_moments]
-        self.variances  = [self.projection_vars,    self.cls_reg_token_vars]
+        
+        self.positional_embeddings_grads   = init_zeros_tensor(self.positional_embeddings.shape)
+        self.positional_embeddings_moments = init_zeros_tensor(self.positional_embeddings.shape)
+        self.positional_embeddings_vars    = init_zeros_tensor(self.positional_embeddings.shape)
+        
+        self.parameters = [self.projection,         self.cls_reg_tokens,        self.positional_embeddings]
+        self.gradients  = [self.projection_grads,   self.cls_reg_token_grads,   self.positional_embeddings_grads]
+        self.moments    = [self.projection_moments, self.cls_reg_token_moments, self.positional_embeddings_moments]
+        self.variances  = [self.projection_vars,    self.cls_reg_token_vars,    self.positional_embeddings_vars]
 
     def forward(self, input):
 
@@ -66,10 +64,12 @@ class VitProjector(Layer):
         class_token_batch = cupy.tile(self.cls_reg_tokens, (self.batch_size, 1, 1))
         self.embeddings = cupy.concatenate([class_token_batch, self.embeddings], axis = 1)
 
-        self.output = self.embeddings + self.positional_encoding
+        self.output = self.embeddings + self.positional_embeddings
         return self.output
 
     def backward(self, gradient):
+        
+        self.positional_embeddings_grads += gradient.sum(axis = 0)
 
         self.cls_reg_token_grads += gradient[:,:self.cls_reg_size,:].sum(axis = 0)
         gradient = gradient[:,self.cls_reg_size:,:]
