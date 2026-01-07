@@ -46,9 +46,9 @@ class Convolution(Layer):
     def backward(self, gradient):
 
         conv_in = cupy.lib.stride_tricks.sliding_window_view(self.padded_input, self.output_dims, (2, 3))
-        self.weight_grads += cupy.einsum("ncklhw,nohw->ockl", conv_in, gradient) / (self.output_dims[0] * self.output_dims[1])
+        self.weight_grads += cupy.einsum("ncklhw,nohw->ockl", conv_in, gradient)
 
-        self.bias_grads += cupy.sum(gradient, axis = 0, keepdims = True).mean(axis = (2, 3), keepdims = True)
+        self.bias_grads += cupy.sum(gradient, axis = (0, 2, 3), keepdims = True)
 
         grad_pad_h = self.kernel_size[0] - 1
         grad_pad_w = self.kernel_size[1] - 1
@@ -120,8 +120,8 @@ class BatchNorm(Layer):
             
     def backward(self, gradient):
         
-        self.gamma_grads += cupy.sum(gradient * self.normed, axis = 0, keepdims = True).mean(axis = (2, 3), keepdims = True)
-        self.beta_grads  += cupy.sum(gradient,               axis = 0, keepdims = True).mean(axis = (2, 3), keepdims = True)
+        self.gamma_grads += cupy.sum(gradient * self.normed, axis = (0, 2, 3), keepdims = True)
+        self.beta_grads  += cupy.sum(gradient,               axis = (0, 2, 3), keepdims = True)
         
         gradient = gradient * self.gamma
         
@@ -249,7 +249,7 @@ class Dropout(Layer):
         
         self.dropout_rate = dropout_rate
         self.dropout_rng  = cupy.random.default_rng()
-        self.droput_neurons = None
+        self.dropout_neurons = None
     
     def forward(self, input):
         self.input = input

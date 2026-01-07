@@ -48,10 +48,14 @@ class Network:
     def _zero_grad(self):
         for layer in self.layers:
             layer.zero_grad()
+    
+    def _zero_adam(self):
+        for layer in self.layers:
+            layer.zero_adam()
 
     def _update(self, learning_rate, weight_decay, t, num_samples):
 
-        beta1, beta2 = 0.9, 0.99
+        beta1, beta2 = 0.9, 0.999
 
         for layer in self.layers:
             
@@ -60,7 +64,7 @@ class Network:
                                                      layer.moments,
                                                      layer.variances):
                 grad /= num_samples
-                lmda = weight_decay 
+                lmda = weight_decay
                 
                 if len(param.shape) == 1 or isinstance(layer, (VitProjector, VitMLPHead, 
                                                                GPTEmbedFront, GPTEmbedBack)):
@@ -83,6 +87,8 @@ class Network:
 
         step_count = 0
         samples_per_step = batch_size * batches_per_step
+        
+        self._zero_adam()
         
         for i in range(epochs):
             

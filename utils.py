@@ -42,10 +42,13 @@ class Layer:
         self.eval_mode = eval_mode
 
     def zero_grad(self):
-        for grad, moment, variance in zip(self.gradients, self.moments, self.variances):
-            grad *= 0
-            moment *= 0
-            variance *= 0
+        for grad in self.gradients:
+            grad.fill(0)
+    
+    def zero_adam(self):
+        for moment, variance in zip(self.moments, self.variances):
+            moment.fill(0)
+            variance.fill(0)
             
 
 class Residual(Layer):
