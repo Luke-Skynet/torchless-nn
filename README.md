@@ -2,7 +2,7 @@
 
 Convolutional Neural Nets, Vision Transformers, and GPT's all implemented from scratch in Cuda Numpy (CuPy).
 Without torch's tensor or autograd engine, this library hand derives all gradient calculations with reverse accumulation.
-While this library is designed to run on an Nvidia GPU (with tensor cores), all cupy calls used are numpy compatible. To run everything on CPU, simply find/replace all instances of ```cupy.``` with ```np.``` and the code with still work.
+While this library is designed to run on an Nvidia GPU (with tensor cores), all cupy calls used are numpy compatible. To run everything on CPU, simply find/replace all instances of ```cupy.``` with ```np.``` and the code will still work.
 
 ## Modules
 
