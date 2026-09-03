@@ -4,28 +4,72 @@ import numpy as np
 from tqdm import tqdm
 
 from utils import Layer, FLOAT_TYPE
+from activations import SoftMax
 from layers import *
 from transformer_adapters import *
 
 
 class CrossEntropy:
 
+    """Fused softmax + cross entropy.
+
+    gradients() returns d(loss)/d(the softmax layer's input), which is why
+    SoftMax(fused_loss = True) passes its gradient straight through.
+
+    Neither method builds a one hot. The identity matrix this used to hold is
+    num_classes squared - 256 GiB at Gemma's 262144 token vocabulary - and indexing
+    it expanded to a full (batch, sequence, vocab) array on every call. Each label
+    selects exactly one entry per row, so both operations are a gather instead.
+    """
+
     def __init__(self, num_classes):
-        self.one_hot = cupy.eye(num_classes, dtype = FLOAT_TYPE)
+        self.num_classes = num_classes
+        self.positions = {}
+
+    def _index(self, labels):
+
+        """Index tuple addressing the entry each label selects.
+
+        Broadcastable ranges over the leading axes, then the labels themselves, so
+        this works for (batch,) classification labels and (batch, sequence) token
+        labels alike. Cached per shape; batches only vary on the final partial one.
+        """
+
+        shape = labels.shape
+
+        if shape not in self.positions:
+            self.positions[shape] = tuple(
+                cupy.arange(size).reshape((-1,) + (1,) * (len(shape) - axis - 1))
+                for axis, size in enumerate(shape))
+
+        return self.positions[shape] + (labels,)
 
     def gradients(self, logits, labels):
-        return logits - self.one_hot[labels] # Combined Softmax + Cross Entropy Loss
-      
+        # softmax output minus the one hot, without the one hot. Every (row, label)
+        # pair is distinct, so the subtraction needs no scattered accumulation.
+        gradient = logits.copy()
+        gradient[self._index(labels)] -= 1
+        return gradient
+
     def loss(self, logits, labels):
-        labels = self.one_hot[labels]
         eta = 1e-7
-        return -1 * cupy.sum(labels * cupy.log(logits + eta))
+        return -1 * cupy.sum(cupy.log(logits[self._index(labels)] + eta))
 
 
 class Network:
 
     def __init__(self, layers:list[Layer]):
         self.layers = layers
+
+        # a fused SoftMax returns its gradient unchanged, which is only right when
+        # CrossEntropy produced that gradient for the last layer of the network
+        for position, layer in enumerate(layers[:-1]):
+            if isinstance(layer, SoftMax) and layer.fused_loss:
+                raise ValueError(
+                    f"SoftMax at position {position} of {len(layers)} has fused_loss = True but is "
+                    "not the final layer. Its backward pass returns the gradient unchanged, which "
+                    "is only correct when CrossEntropy supplied it. Use SoftMax(fused_loss = False) "
+                    "to apply the real Jacobian mid network.")
         
     def predict(self, input):
         return self._forward(input)
@@ -33,6 +77,10 @@ class Network:
     def _forward(self, input):
         for layer in self.layers:
             input = layer.forward(input)
+            if layer.inference_only:
+                # the next layer already holds what it needs, so drop this one's
+                # activations now rather than pinning all of them until the forward ends
+                layer.clear_cache()
         return input
 
     def _backward(self, gradient):
@@ -73,8 +121,14 @@ class Network:
                 moment *= beta1
                 moment += (1 - beta1)*grad
 
+                # grad is scratch from here on: it is zeroed immediately after the
+                # step, so squaring and scaling it in place saves two full sized
+                # temporaries per parameter. Bitwise identical to (1 - beta2)*grad**2.
+                grad *= grad
+                grad *= (1 - beta2)
+
                 variance *= beta2
-                variance += (1 - beta2)*grad**2
+                variance += grad
 
                 mom_hat = moment / (1 - beta1**t)
                 var_hat = variance / (1 - beta2**t)
@@ -84,6 +138,11 @@ class Network:
     def train(self, criterion, train_data, train_labels, test_data = None, test_labels = None,
                     augments = None, epochs = 1, batch_size = 64, batches_per_step = 1,
                     learning_rate = 0.001, weight_decay = 0.01):
+
+        if any(layer.inference_only for layer in self.layers):
+            raise RuntimeError("this model was built inside inference_mode(): it has no gradient, "
+                               "moment or variance buffers to train with. Rebuild it outside the "
+                               "context to train.")
 
         step_count = 0
         samples_per_step = batch_size * batches_per_step

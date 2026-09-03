@@ -1,9 +1,10 @@
 import cupy
 
-from utils import Layer, FLOAT_TYPE, init_random_tensor, init_zeros_tensor
-
+from utils import Layer, FLOAT_TYPE, init_random_tensor, init_zeros_tensor, scatter_add
 
 class VitProjector(Layer):
+
+    CACHED = ("input", "output", "tokens", "embeddings")
 
     def __init__(self, input_size:tuple, patch_size:tuple, embedding_dim, num_registers = 0):
         super(VitProjector, self).__init__()
@@ -27,22 +28,11 @@ class VitProjector(Layer):
         self.cls_reg_tokens        = init_random_tensor((self.cls_reg_size, self.embedding_dim)) / self.embedding_dim**0.5
         self.positional_embeddings = init_zeros_tensor((self.cls_reg_size + self.sequence_length, self.embedding_dim))
 
-        self.projection_grads   = init_zeros_tensor(self.projection.shape)
-        self.projection_moments = init_zeros_tensor(self.projection.shape)
-        self.projection_vars    = init_zeros_tensor(self.projection.shape)
-
-        self.cls_reg_token_grads   = init_zeros_tensor(self.cls_reg_tokens.shape)
-        self.cls_reg_token_moments = init_zeros_tensor(self.cls_reg_tokens.shape)
-        self.cls_reg_token_vars    = init_zeros_tensor(self.cls_reg_tokens.shape)
         
-        self.positional_embeddings_grads   = init_zeros_tensor(self.positional_embeddings.shape)
-        self.positional_embeddings_moments = init_zeros_tensor(self.positional_embeddings.shape)
-        self.positional_embeddings_vars    = init_zeros_tensor(self.positional_embeddings.shape)
         
-        self.parameters = [self.projection,         self.cls_reg_tokens,        self.positional_embeddings]
-        self.gradients  = [self.projection_grads,   self.cls_reg_token_grads,   self.positional_embeddings_grads]
-        self.moments    = [self.projection_moments, self.cls_reg_token_moments, self.positional_embeddings_moments]
-        self.variances  = [self.projection_vars,    self.cls_reg_token_vars,    self.positional_embeddings_vars]
+        self.projection_grads            = self.register(self.projection)
+        self.cls_reg_token_grads         = self.register(self.cls_reg_tokens)
+        self.positional_embeddings_grads = self.register(self.positional_embeddings)
 
     def forward(self, input):
 
@@ -85,8 +75,9 @@ class VitProjector(Layer):
         gradient = gradient.reshape((self.batch_size, self.channels, self.height, self.width))
         return gradient
 
-
 class VitMLPHead(Layer):
+
+    CACHED = ("input", "output", "class_tokens")
 
     def __init__(self, in_channels, out_channels):
         super(VitMLPHead, self).__init__()
@@ -96,18 +87,8 @@ class VitMLPHead(Layer):
 
         self.class_tokens = None
 
-        self.weight_grads   = init_zeros_tensor(self.weights.shape)
-        self.weight_moments = init_zeros_tensor(self.weights.shape)
-        self.weight_vars    = init_zeros_tensor(self.weights.shape)
-
-        self.bias_grads   = init_zeros_tensor(self.bias.shape)
-        self.bias_moments = init_zeros_tensor(self.bias.shape)
-        self.bias_vars    = init_zeros_tensor(self.bias.shape)
-
-        self.parameters = [self.weights,          self.bias]
-        self.gradients  = [self.weight_grads,     self.bias_grads]
-        self.moments    = [self.weight_moments,   self.bias_moments]
-        self.variances  = [self.weight_vars,      self.bias_vars]
+        self.weight_grads = self.register(self.weights)
+        self.bias_grads   = self.register(self.bias)
 
     def forward(self, input):
 
@@ -127,42 +108,52 @@ class VitMLPHead(Layer):
 
         return cupy.concatenate((gradient, init_zeros_tensor(self.input.shape)[:,:-1,:]), axis = 1)
 
-
 class GPTEmbedFront(Layer):
 
-    def __init__(self, table, context_length):
+    """Token embedding lookup, with optional absolute sinusoidal positions.
+
+    positional = "none" is what a RoPE model wants: position enters inside attention
+    instead, so nothing is added here.
+
+    scale_embeddings multiplies by sqrt(embedding_dim), which is what Gemma does to
+    put the embedding scale on the same footing as the residual stream.
+    """
+
+    def __init__(self, table, context_length, positional = "sinusoidal", scale_embeddings = False):
         super(GPTEmbedFront, self).__init__()
 
+        assert positional in {"sinusoidal", "none"}
+
         self.table         = table
-        self.table_grads   = init_zeros_tensor(self.table.shape)
-        self.table_moments = init_zeros_tensor(self.table.shape)
-        self.table_vars    = init_zeros_tensor(self.table.shape)
 
-        self.one_hot        = cupy.eye(table.shape[0], dtype=FLOAT_TYPE)
-        self.one_hot_inputs = None
+        self.scale = table.shape[1]**0.5 if scale_embeddings else 1.0
 
-        pos = cupy.arange(context_length)[:, None]
-        i   = cupy.arange(table.shape[1])[None, :]
+        self.positional_encoding = None
+        if positional == "sinusoidal":
+            pos = cupy.arange(context_length)[:, None]
+            i   = cupy.arange(table.shape[1])[None, :]
 
-        self.positional_encoding = pos / 10000**(2 * (i // 2) / table.shape[1])
-        self.positional_encoding[:, 0::2] = cupy.sin(self.positional_encoding[:, 0::2])
-        self.positional_encoding[:, 1::2] = cupy.cos(self.positional_encoding[:, 1::2])
-        self.positional_encoding = self.positional_encoding.astype(FLOAT_TYPE, copy = False)
+            self.positional_encoding = pos / 10000**(2 * (i // 2) / table.shape[1])
+            self.positional_encoding[:, 0::2] = cupy.sin(self.positional_encoding[:, 0::2])
+            self.positional_encoding[:, 1::2] = cupy.cos(self.positional_encoding[:, 1::2])
+            self.positional_encoding = self.positional_encoding.astype(FLOAT_TYPE, copy = False)
 
-        self.parameters = [self.table]
-        self.gradients  = [self.table_grads]
-        self.moments    = [self.table_moments]
-        self.variances  = [self.table_vars]
+        self.table_grads = self.register(self.table)
 
     def forward(self, input):
-        self.input = input
-        self.one_hot_inputs = self.one_hot[self.input]
-        self.output = self.one_hot_inputs @ self.table + self.positional_encoding[:self.input.shape[1],:]
+        self.input  = input
+        self.output = self.table[self.input]
+
+        if self.scale != 1.0:
+            self.output = self.output * self.scale
+        if self.positional_encoding is not None:
+            self.output = self.output + self.positional_encoding[:self.input.shape[1],:]
+
         return self.output
 
     def backward(self, gradient):
-        self.table_grads += cupy.tensordot(self.one_hot_inputs.transpose(2, 0, 1), gradient, 2) / gradient.shape[1]
-        return gradient @ self.table.transpose()
+        scatter_add(self.table_grads, self.input, gradient * (self.scale / gradient.shape[1]))
+        return None # nothing upstream of the token ids to receive a gradient
 
 
 class GPTEmbedBack(Layer):
@@ -171,14 +162,7 @@ class GPTEmbedBack(Layer):
         super(GPTEmbedBack, self).__init__()
 
         self.table         = table
-        self.table_grads   = init_zeros_tensor(self.table.shape)
-        self.table_moments = init_zeros_tensor(self.table.shape)
-        self.table_vars    = init_zeros_tensor(self.table.shape)
-
-        self.parameters = [self.table]
-        self.gradients  = [self.table_grads]
-        self.moments    = [self.table_moments]
-        self.variances  = [self.table_vars]
+        self.table_grads = self.register(self.table)
 
     def forward(self, input):
         self.input = input

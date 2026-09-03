@@ -18,6 +18,8 @@ class ReLU(Layer):
 
 class GeLU(Layer):
 
+    CACHED = ("input", "output", "tanh")
+
     def __init__(self):
         super(GeLU, self).__init__()
 
@@ -35,6 +37,8 @@ class GeLU(Layer):
 
 class SiLU(Layer):
 
+    CACHED = ("input", "output", "sigmoid")
+
     def __init__(self):
         super(SiLU, self).__init__()
 
@@ -50,9 +54,23 @@ class SiLU(Layer):
 
 class SoftMax(Layer):
 
-    def __init__(self, temperature = 1.0):
+    """Softmax over the last axis.
+
+    fused_loss=True (the default) is the arrangement the rest of the library assumes:
+    this layer sits last, CrossEntropy.gradients already returns the gradient with
+    respect to this layer's *input* for the softmax + cross entropy pair, and backward
+    passes it straight through. That is only correct in that position - used anywhere
+    else it silently drops the softmax Jacobian, so Network rejects a fused SoftMax
+    that is not the final layer.
+
+    fused_loss=False computes the real Jacobian, y * (g - sum(g * y)), and can be used
+    anywhere in a network.
+    """
+
+    def __init__(self, temperature = 1.0, fused_loss = True):
         super(SoftMax, self).__init__()
         self.temperature = temperature
+        self.fused_loss  = fused_loss
 
     def forward(self, input):
         self.input = input
@@ -64,4 +82,10 @@ class SoftMax(Layer):
         return self.output
 
     def backward(self, gradient):
-        return gradient # handled by Cross Entropy Loss
+
+        if not self.fused_loss:
+            gradient = self.output * (gradient - (gradient * self.output).sum(axis = -1, keepdims = True))
+
+        # temperature divides the logits on the way in, so it divides the gradient on
+        # the way out. At the default of 1.0 this is the untouched gradient.
+        return gradient if self.temperature == 1.0 else gradient / self.temperature

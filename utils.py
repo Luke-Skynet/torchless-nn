@@ -6,6 +6,66 @@ global FLOAT_TYPE
 FLOAT_TYPE = cupy.float32 # (TF32 enabled)
 
 
+# inference mode: build a model with no training state at all
+
+INFERENCE_MODE = False
+
+
+class inference_mode:
+
+    """Build and run a model without any of the state that only backward needs.
+
+    Layers constructed inside this context allocate no gradient, moment or variance
+    buffers - three extra full size copies of every parameter - and Network._forward
+    drops each layer's cached activations as soon as the next layer has consumed them.
+    For a Gemma 4 31B configuration that is the difference between ~474 GiB and
+    ~115 GiB.
+
+    Construction has to happen inside the context, because the buffers are allocated
+    in each layer's __init__:
+
+        with inference_mode():
+            model = gemma_gpt(**config)
+
+        model.predict(tokens)          # fine, inside or outside the context
+
+    Layers remember how they were built, so prediction behaves correctly either way.
+    Calling backward() on such a model raises, which is the intent - there is nowhere
+    for a gradient to accumulate.
+    """
+
+    def __init__(self, enabled = True):
+        self.enabled = enabled
+
+    def __enter__(self):
+        global INFERENCE_MODE
+        self.previous  = INFERENCE_MODE
+        INFERENCE_MODE = self.enabled
+        return self
+
+    def __exit__(self, *exception):
+        global INFERENCE_MODE
+        INFERENCE_MODE = self.previous
+        return False
+
+
+# scattered accumulation, used for embedding table gradients
+
+try:
+    from cupyx import scatter_add as _scatter_add
+except ImportError: # running on CPU with numpy substituted for cupy
+    def _scatter_add(target, indices, values):
+        cupy.add.at(target, indices, values)
+
+def scatter_add(target, indices, values):
+    """In place target[indices] += values, summing contributions of repeated indices.
+
+    Used instead of a one hot matmul for embedding lookups: the one hot route costs
+    a (batch, sequence, vocab) intermediate, which is fine at char level vocabs and
+    fatal at the 262144 token vocab a Gemma style model uses."""
+    _scatter_add(target, indices, values)
+
+
 # tensor initialization with float type
 
 def init_random_tensor(size):
@@ -20,6 +80,11 @@ def init_zeros_tensor(size):
 
 class Layer:
 
+    # activations stashed by forward for backward to consume. Listed per layer so
+    # clear_cache knows what is safe to drop: it must never touch anything the next
+    # forward still needs, such as BatchNorm's running statistics or a cached mask.
+    CACHED = ("input", "output")
+
     def __init__(self):
 
         self.input = None
@@ -31,6 +96,34 @@ class Layer:
         self.variances = []
 
         self.eval_mode = False
+        self.inference_only = INFERENCE_MODE
+
+    def register(self, parameter):
+
+        """Register a parameter and allocate its optimizer buffers.
+
+        Returns the gradient buffer, so layers can keep a named handle on it. Under
+        inference mode nothing is allocated and None is returned: the four lists stay
+        parallel because they all stay empty, which quietly makes zero_grad and the
+        optimizer step no-ops, and makes backward fail loudly on the None.
+        """
+
+        self.parameters.append(parameter)
+
+        if self.inference_only:
+            return None
+
+        gradient = init_zeros_tensor(parameter.shape)
+
+        self.gradients.append(gradient)
+        self.moments.append(init_zeros_tensor(parameter.shape))
+        self.variances.append(init_zeros_tensor(parameter.shape))
+
+        return gradient
+
+    def clear_cache(self):
+        for name in self.CACHED:
+            setattr(self, name, None)
 
     def forward(self, *input):
         raise NotImplementedError
@@ -101,6 +194,11 @@ class Residual(Layer):
     def set_eval(self, eval_mode):
         for layer in self.layers:
             layer.set_eval(eval_mode)
+
+    def clear_cache(self):
+        super(Residual, self).clear_cache()
+        for layer in self.layers:
+            layer.clear_cache()
             
 
 # crude augments from scratch

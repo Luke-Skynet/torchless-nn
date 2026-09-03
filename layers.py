@@ -4,6 +4,8 @@ from utils import Layer, FLOAT_TYPE, init_random_tensor, init_zeros_tensor
 
 class Convolution(Layer):
 
+    CACHED = ("input", "output", "padded_input")
+
     def __init__(self, input_dim: tuple, num_kernels:int, kernel_size: tuple, padding = (0, 0)):
         super(Convolution, self).__init__()
 
@@ -18,18 +20,8 @@ class Convolution(Layer):
         self.weights = self.weights / (input_dim[0] * kernel_size[0] * kernel_size[1])**0.5
         self.bias    = init_zeros_tensor(num_kernels).reshape(1, num_kernels, 1, 1)
         
-        self.weight_grads   = init_zeros_tensor(self.weights.shape)
-        self.weight_moments = init_zeros_tensor(self.weights.shape)
-        self.weight_vars    = init_zeros_tensor(self.weights.shape)
-
-        self.bias_grads   = init_zeros_tensor(self.bias.shape)
-        self.bias_moments = init_zeros_tensor(self.bias.shape)
-        self.bias_vars    = init_zeros_tensor(self.bias.shape)
-
-        self.parameters = [self.weights,          self.bias]
-        self.gradients  = [self.weight_grads,     self.bias_grads]
-        self.moments    = [self.weight_moments,   self.bias_moments]
-        self.variances  = [self.weight_vars,      self.bias_vars]
+        self.weight_grads = self.register(self.weights)
+        self.bias_grads   = self.register(self.bias)
 
     def forward(self, input):
 
@@ -62,8 +54,9 @@ class Convolution(Layer):
         
         return gradient
 
-
 class BatchNorm(Layer):
+    CACHED = ("input", "output", "mean", "var", "std", "centered", "normed")
+
     def __init__(self, num_channels):
         super(BatchNorm, self).__init__()
         
@@ -78,24 +71,14 @@ class BatchNorm(Layer):
         self.gamma = init_zeros_tensor((1, num_channels, 1, 1)) + 1
         self.beta  = init_zeros_tensor((1, num_channels, 1, 1))
 
-        self.gamma_grads   = init_zeros_tensor(self.gamma.shape)
-        self.gamma_moments = init_zeros_tensor(self.gamma.shape)
-        self.gamma_vars    = init_zeros_tensor(self.gamma.shape)
-
-        self.beta_grads   = init_zeros_tensor(self.beta.shape)
-        self.beta_moments = init_zeros_tensor(self.beta.shape)
-        self.beta_vars    = init_zeros_tensor(self.beta.shape)
-
         self.mean = None
         self.var = None
         self.std = None
         self.centered = None
         self.normed = None
 
-        self.parameters = [self.gamma,         self.beta]
-        self.gradients  = [self.gamma_grads,   self.beta_grads]
-        self.moments    = [self.gamma_moments, self.beta_moments]
-        self.variances  = [self.gamma_vars,    self.beta_vars]
+        self.gamma_grads = self.register(self.gamma)
+        self.beta_grads  = self.register(self.beta)
     
     def forward(self, input):
         
@@ -132,6 +115,8 @@ class BatchNorm(Layer):
 
 class MaxPool(Layer):
 
+    CACHED = ("input", "output", "mask")
+
     def __init__(self, pool_height, pool_width):
         super(MaxPool, self).__init__()
 
@@ -166,12 +151,14 @@ class MaxPool(Layer):
 
 class AveragePool(Layer):
 
+    CACHED = ("input", "output")
+
     def __init__(self, pool_height, pool_width):
         super(AveragePool, self).__init__()
 
         self.pool_h, self.pool_w = (pool_height, pool_width)
         self.batch_size, self.channels, self.in_h, self.in_w = 0,0,0,0
-        self.mask = None
+        self.view_shape = None
 
     def forward(self, input):
 
@@ -186,16 +173,17 @@ class AveragePool(Layer):
         
         self.output = view.mean(axis=(3, 5), keepdims = True)
 
-        self.mask   = cupy.ones(view.shape) / (self.pool_h * self.pool_w)
+        self.view_shape = view.shape
         self.output = self.output.reshape(self.batch_size, self.channels, out_h, out_w)
         return self.output
 
     def backward(self, gradient):
-        gradient = gradient[:, :, :, cupy.newaxis, :, cupy.newaxis]
-        gradient = gradient * self.mask
-        gradient = gradient.reshape(self.batch_size, self.channels, self.in_h, self.in_w)
-        return gradient
-
+        # every input in a window contributed equally, so the gradient spreads evenly.
+        # This used to multiply by a full input sized array holding one constant, which
+        # also promoted the gradient to float64: cupy.ones() has no dtype by default.
+        gradient = gradient[:, :, :, cupy.newaxis, :, cupy.newaxis] / (self.pool_h * self.pool_w)
+        gradient = cupy.broadcast_to(gradient, self.view_shape).copy()
+        return gradient.reshape(self.batch_size, self.channels, self.in_h, self.in_w)
 
 class Flatten(Layer):
 
@@ -219,18 +207,8 @@ class Dense(Layer):
         self.weights = init_random_tensor((input_size, output_size)) / input_size**0.5
         self.bias    = init_zeros_tensor(output_size)
 
-        self.weight_grads   = init_zeros_tensor(self.weights.shape)
-        self.weight_moments = init_zeros_tensor(self.weights.shape)
-        self.weight_vars    = init_zeros_tensor(self.weights.shape)
-
-        self.bias_grads   = init_zeros_tensor(self.bias.shape)
-        self.bias_moments = init_zeros_tensor(self.bias.shape)
-        self.bias_vars    = init_zeros_tensor(self.bias.shape)
-
-        self.parameters = [self.weights,        self.bias]
-        self.gradients  = [self.weight_grads,   self.bias_grads]
-        self.moments    = [self.weight_moments, self.bias_moments]
-        self.variances  = [self.weight_vars,    self.bias_vars]
+        self.weight_grads = self.register(self.weights)
+        self.bias_grads   = self.register(self.bias)
 
     def forward(self, input):
         self.input  = input
@@ -242,8 +220,9 @@ class Dense(Layer):
         self.bias_grads   += cupy.sum(gradient, axis = 0)
         return gradient @ self.weights.transpose()
 
-
 class Dropout(Layer):
+    CACHED = ("input", "output", "dropout_neurons")
+
     def __init__(self, dropout_rate):
         super(Dropout, self).__init__()
         
@@ -266,70 +245,329 @@ class Dropout(Layer):
             gradient *= self.dropout_neurons
         return gradient
 
-# TODO add GQA option and switch to RoPE
+# Causal masks are cached by block geometry, not by sequence length, and shared across
+# every attention layer. A sliding window model has only a handful of distinct block
+# geometries no matter how long the sequence is, so this never grows with context.
+_BLOCK_MASKS = {}
+
+class RMSNorm(Layer):
+
+    """Root mean square normalization, the norm Gemma style transformers use.
+
+    Unlike LayerNorm there is no mean subtraction and no beta: the vector is only
+    rescaled. Written shape agnostically over the last axis so the same layer serves
+    both (batch, sequence, channels) activations and the (batch, kv_heads, group,
+    sequence, head_dim) query/key tensors that QK norm operates on.
+
+    Gemma checkpoints store this weight as (gamma - 1), applying it as (1 + w).
+    """
+
+    CACHED = ("input", "output", "normed", "rms")
+
+    def __init__(self, num_channels, eps = 1e-6):
+        super(RMSNorm, self).__init__()
+
+        self.channels = num_channels
+        self.eps = eps
+
+        self.gamma = init_zeros_tensor(num_channels) + 1
+
+        self.rms = None
+        self.normed = None
+
+        self.gamma_grads = self.register(self.gamma)
+
+    def forward(self, input):
+
+        self.input = input
+
+        self.rms    = (cupy.mean(input * input, axis = -1, keepdims = True) + self.eps)**0.5
+        self.normed = input / self.rms
+
+        self.output = self.gamma * self.normed
+        return self.output
+
+    def backward(self, gradient):
+
+        # match the library convention of summing weight grads over the batch and
+        # averaging over every axis between batch and channels
+        axes = tuple(range(gradient.ndim - 1))
+        span = 1
+        for dim in gradient.shape[1:-1]:
+            span *= dim
+
+        self.gamma_grads += cupy.sum(gradient * self.normed, axis = axes) / span
+
+        gradient = gradient * self.gamma
+        return (gradient - self.normed * cupy.mean(gradient * self.normed, axis = -1, keepdims = True)) / self.rms
+
+class RotaryEmbedding:
+
+    """Rotary position embeddings, applied to the head split query and key tensors.
+
+    partial_rotary_factor < 1 gives Gemma 4's p-RoPE: only the leading fraction of
+    each head's dimensions is rotated and the remainder carries no position signal,
+    which keeps the low frequency dimensions clean over very long contexts. Gemma 4
+    uses theta 10000 with full rotation on sliding layers, and theta 1e6 with
+    partial_rotary_factor 0.25 on global layers.
+
+    This holds no parameters, so it is a plain helper rather than a Layer.
+    """
+
+    def __init__(self, head_dim, context_length, theta = 10000.0, partial_rotary_factor = 1.0):
+
+        self.head_dim   = head_dim
+        self.rotary_dim = int(head_dim * partial_rotary_factor)
+        self.rotary_dim = self.rotary_dim - self.rotary_dim % 2
+
+        # a factor small enough to round the rotary width to zero would silently strip
+        # all positional information rather than partially applying it
+        assert self.rotary_dim >= 2, (f"partial_rotary_factor {partial_rotary_factor} leaves "
+                                      f"no rotary dimensions for head_dim {head_dim}")
+
+        half     = self.rotary_dim // 2
+        inv_freq = 1.0 / (theta ** (cupy.arange(half, dtype = FLOAT_TYPE) * 2.0 / self.rotary_dim))
+
+        angles = cupy.arange(context_length, dtype = FLOAT_TYPE)[:, None] * inv_freq[None, :]
+        angles = cupy.concatenate((angles, angles), axis = -1)
+
+        self.cos = cupy.cos(angles).astype(FLOAT_TYPE, copy = False)
+        self.sin = cupy.sin(angles).astype(FLOAT_TYPE, copy = False)
+
+    @staticmethod
+    def _rotate_half(x):
+        half = x.shape[-1] // 2
+        return cupy.concatenate((-x[..., half:], x[..., :half]), axis = -1)
+
+    def rotate(self, x, offset = 0):
+
+        length = x.shape[-2]
+        cos = self.cos[offset : offset + length]
+        sin = self.sin[offset : offset + length]
+
+        if self.rotary_dim == self.head_dim:
+            return x * cos + self._rotate_half(x) * sin
+
+        rotated = x[..., :self.rotary_dim] * cos + self._rotate_half(x[..., :self.rotary_dim]) * sin
+        return cupy.concatenate((rotated, x[..., self.rotary_dim:]), axis = -1)
+
+    def backward(self, gradient, offset = 0):
+
+        # the rotation is orthogonal, so the reverse pass is the transposed rotation
+        length = gradient.shape[-2]
+        cos = self.cos[offset : offset + length]
+        sin = self.sin[offset : offset + length]
+
+        if self.rotary_dim == self.head_dim:
+            return gradient * cos - self._rotate_half(gradient) * sin
+
+        rotated = gradient[..., :self.rotary_dim] * cos - self._rotate_half(gradient[..., :self.rotary_dim]) * sin
+        return cupy.concatenate((rotated, gradient[..., self.rotary_dim:]), axis = -1)
+
 class MultiHeadAttention(Layer):
 
-    def __init__(self, embedding_dim, context_length, num_heads, decoder = False):
+    """Multi head attention, optionally grouped query (GQA).
+
+    Heads are laid out as (batch, kv_heads, group, sequence, head_dim) so that a
+    single set of key/value heads broadcasts across the query heads that share it,
+    with no materialized repeat. Plain MHA is the group = 1 case.
+
+    num_kv_heads / head_dim / kv_shared all default to the plain MHA behaviour, in
+    which case the query, key and value projections stay fused into one matrix and
+    the parameter list is unchanged, so existing checkpoints still load.
+
+    kv_shared is Gemma 4's attention_k_eq_v: global layers project once and use the
+    result as both key and value. The value branches off before q/k norm and RoPE,
+    since those exist to condition the attention logits and must not touch values.
+    """
+
+    CACHED = ("input", "output", "query", "key", "value", "softmax", "chunks", "heads_out")
+
+    def __init__(self, embedding_dim, context_length, num_heads, decoder = False,
+                       num_kv_heads = None, head_dim = None, qk_norm = False,
+                       rope = None, sliding_window = None, kv_shared = False,
+                       chunk_size = None):
         super(MultiHeadAttention, self).__init__()
 
         self.embedding_dim  = embedding_dim
         self.context_length = context_length
 
-        self.num_heads = num_heads
-        self.heads_dim = embedding_dim // num_heads
+        self.num_heads    = num_heads
+        self.num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
+        self.heads_dim    = embedding_dim // num_heads if head_dim is None else head_dim
 
-        self.mask = cupy.tril(cupy.ones((context_length, context_length)))
-        self.mask = cupy.where(self.mask == 0, -1e9, 0.0).astype(FLOAT_TYPE, copy = False)
+        assert self.num_heads % self.num_kv_heads == 0, "num_heads must be a multiple of num_kv_heads"
+        self.groups = self.num_heads // self.num_kv_heads
+
+        self.query_dim = self.num_heads    * self.heads_dim
+        self.kv_dim    = self.num_kv_heads * self.heads_dim
+
+        self.kv_shared = kv_shared
+        self.rope      = rope
+
+        # keep the fused projection (and therefore the parameter layout) whenever the
+        # caller asked for nothing that would change its shape
+        self.fused = num_kv_heads is None and head_dim is None and not kv_shared
+
+        self.sliding_window = sliding_window
+
+        # queries are processed in blocks of chunk_size. None means one block, which
+        # is exactly the unchunked computation. Setting it bounds peak memory by the
+        # block size instead of the sequence length, and for a sliding window layer it
+        # also skips computing the scores that the mask would only throw away.
+        assert chunk_size is None or chunk_size >= 1, "chunk_size must be positive or None"
+        self.chunk_size = chunk_size
 
         self.query = None
-        self.key_t = None
+        self.key   = None
         self.value = None
-        
-        self.softmax = None
+
+        self.softmax = None   # list of per block attention weights
+        self.chunks  = None   # list of (q0, q1, k0, k1) bounds matching self.softmax
         self.heads_out = None
-        
+
         self.is_decoder = decoder
 
-        self.qkv_weights = init_random_tensor((embedding_dim, 3*embedding_dim)) / embedding_dim**0.5
-        self.out_weights = init_random_tensor((embedding_dim,   embedding_dim)) / embedding_dim**0.5
+        self.q_norm = RMSNorm(self.heads_dim) if qk_norm else None
+        self.k_norm = RMSNorm(self.heads_dim) if qk_norm else None
 
-        self.qkv_weight_grads   = init_zeros_tensor(self.qkv_weights.shape)
-        self.qkv_weight_moments = init_zeros_tensor(self.qkv_weights.shape)
-        self.qkv_weight_vars    = init_zeros_tensor(self.qkv_weights.shape)
+        if self.fused:
+            self.qkv_weights = init_random_tensor((embedding_dim, 3*embedding_dim)) / embedding_dim**0.5
+            self.qkv_weight_grads = self.register(self.qkv_weights)
+        else:
+            self.q_weights = init_random_tensor((embedding_dim, self.query_dim)) / embedding_dim**0.5
+            self.k_weights = init_random_tensor((embedding_dim, self.kv_dim))    / embedding_dim**0.5
 
-        self.out_weight_grads   = init_zeros_tensor(self.out_weights.shape)
-        self.out_weight_moments = init_zeros_tensor(self.out_weights.shape)
-        self.out_weight_vars    = init_zeros_tensor(self.out_weights.shape)
+            self.q_weight_grads = self.register(self.q_weights)
+            self.k_weight_grads = self.register(self.k_weights)
 
-        self.parameters = [self.qkv_weights,        self.out_weights]
-        self.gradients  = [self.qkv_weight_grads,   self.out_weight_grads]
-        self.moments    = [self.qkv_weight_moments, self.out_weight_moments]
-        self.variances  = [self.qkv_weight_vars,    self.out_weight_vars]
+            if not self.kv_shared:
+                self.v_weights = init_random_tensor((embedding_dim, self.kv_dim)) / embedding_dim**0.5
+                self.v_weight_grads = self.register(self.v_weights)
 
+        self.out_weights = init_random_tensor((self.query_dim, embedding_dim)) / self.query_dim**0.5
+        self.out_weight_grads = self.register(self.out_weights)
+
+        # the q/k norms own their own parameters; surface them through this layer so
+        # the optimizer sees one flat set of parallel lists
+        for norm in (self.q_norm, self.k_norm):
+            if norm is not None:
+                self.parameters += norm.parameters
+                self.gradients  += norm.gradients
+                self.moments    += norm.moments
+                self.variances  += norm.variances
+
+    def _key_range(self, q0, q1, length):
+
+        """Keys that queries [q0, q1) are allowed to see."""
+
+        if not self.is_decoder:
+            return 0, length
+        if self.sliding_window is None:
+            return 0, q1
+        return max(0, q0 - self.sliding_window + 1), q1
+
+    def _block_mask(self, q0, q1, k0, k1):
+
+        """Additive mask for one query block, covering only the columns where it bites.
+
+        Returns (mask, column offset). A layer with no sliding window spans keys
+        [0, q1), and every key before the block is visible to every query in it, so the
+        mask is only non-trivial over the diagonal corner - returning that corner keeps
+        the cache at O(chunk_size^2) instead of growing with the sequence length. A
+        sliding window block is non-trivial throughout, but is bounded by the window.
+
+        The signature is the block's geometry, not its position, so interior blocks all
+        share one entry and every layer shares the same cache.
+        """
+
+        offset = 0 if self.sliding_window is not None else q0 - k0
+
+        rows_ahead = q0 - k0 - offset
+        width      = k1 - k0 - offset
+        signature  = (rows_ahead, q1 - q0, width, self.sliding_window)
+
+        if signature not in _BLOCK_MASKS:
+            rows = cupy.arange(q1 - q0)[:, None] + rows_ahead
+            cols = cupy.arange(width)[None, :]
+
+            allowed = cols <= rows
+            if self.sliding_window is not None:
+                allowed = allowed & ((rows - cols) < self.sliding_window)
+
+            _BLOCK_MASKS[signature] = cupy.where(allowed, 0.0, -1e9).astype(FLOAT_TYPE, copy = False)
+
+        return _BLOCK_MASKS[signature], offset
+
+    def clear_cache(self):
+        super(MultiHeadAttention, self).clear_cache()
+        for norm in (self.q_norm, self.k_norm):
+            if norm is not None:
+                norm.clear_cache()
+
+    def _split_heads(self, x, num_heads, groups):
+        batch, length = x.shape[0], x.shape[1]
+        x = x.reshape((batch, length, num_heads, groups, self.heads_dim))
+        return x.transpose(0, 2, 3, 1, 4)
+
+    def _merge_heads(self, x):
+        batch, length = x.shape[0], x.shape[3]
+        x = x.transpose(0, 3, 1, 2, 4)
+        return x.reshape((batch, length, x.shape[2] * x.shape[3] * self.heads_dim))
 
     def forward(self, input):
 
         self.input = input
         B, T, C    = self.input.shape
 
-        qkv = self.input @ self.qkv_weights
-        self.query, self.key_t, self.value = cupy.split(qkv, 3, axis = 2)
+        if self.fused:
+            qkv = self.input @ self.qkv_weights
+            query, key, value = cupy.split(qkv, 3, axis = 2)
+        else:
+            query = self.input @ self.q_weights
+            key   = self.input @ self.k_weights
+            value = key if self.kv_shared else self.input @ self.v_weights
 
-        self.query = self.query.reshape((B, T, self.num_heads, self.heads_dim)).transpose(0, 2, 1, 3)
-        self.key_t = self.key_t.reshape((B, T, self.num_heads, self.heads_dim)).transpose(0, 2, 3, 1)
-        self.value = self.value.reshape((B, T, self.num_heads, self.heads_dim)).transpose(0, 2, 1, 3)
+        query = self._split_heads(query, self.num_kv_heads, self.groups)
+        key   = self._split_heads(key,   self.num_kv_heads, 1)
+        self.value = self._split_heads(value, self.num_kv_heads, 1)
 
-        attends = (self.query @ self.key_t) / self.heads_dim**.5
+        if self.q_norm is not None:
+            query = self.q_norm.forward(query)
+            key   = self.k_norm.forward(key)
 
-        if self.is_decoder:
-            attends += self.mask[:T,:T]
+        if self.rope is not None:
+            query = self.rope.rotate(query)
+            key   = self.rope.rotate(key)
 
-        normalization = cupy.max(attends, axis = -1, keepdims = True)
-        exponent      = cupy.exp(attends - normalization)
-        self.softmax  = exponent / cupy.sum(exponent, axis = -1, keepdims=True)
+        self.query, self.key = query, key
 
-        self.heads_out = self.softmax @ self.value
-        self.heads_out = self.heads_out.transpose(0, 2, 1, 3).reshape(B, T, C)
+        step = self.chunk_size or T
+        self.softmax, self.chunks, outputs = [], [], []
+
+        for q0 in range(0, T, step):
+
+            q1     = min(q0 + step, T)
+            k0, k1 = self._key_range(q0, q1, T)
+
+            attends = (self.query[:, :, :, q0:q1, :] @
+                       self.key[:, :, :, k0:k1, :].transpose(0, 1, 2, 4, 3)) / self.heads_dim**.5
+
+            if self.is_decoder:
+                # attends is freshly allocated by the matmul, so this can be in place
+                mask, offset = self._block_mask(q0, q1, k0, k1)
+                attends[..., offset:] += mask
+
+            normalization = cupy.max(attends, axis = -1, keepdims = True)
+            exponent      = cupy.exp(attends - normalization)
+            attends       = exponent / cupy.sum(exponent, axis = -1, keepdims=True)
+
+            self.softmax.append(attends)
+            self.chunks.append((q0, q1, k0, k1))
+            outputs.append(attends @ self.value[:, :, :, k0:k1, :])
+
+        self.heads_out = self._merge_heads(outputs[0] if len(outputs) == 1 else
+                                           cupy.concatenate(outputs, axis = -2))
 
         self.output = self.heads_out @ self.out_weights
 
@@ -342,42 +580,82 @@ class MultiHeadAttention(Layer):
         self.out_weight_grads += cupy.tensordot(self.heads_out.transpose(2, 0, 1), gradient, 2) / T
         gradient = gradient @ self.out_weights.transpose()
 
-        gradient = gradient.reshape((B, T, self.num_heads, self.heads_dim)).transpose(0, 2, 1, 3)
+        gradient = self._split_heads(gradient, self.num_kv_heads, self.groups)
 
-        value_grads = self.softmax.transpose(0, 1, 3, 2) @ gradient
-        gradient = gradient @ self.value.transpose(0, 1, 3, 2)
+        query_grads = init_zeros_tensor(self.query.shape)
+        key_grads   = init_zeros_tensor(self.key.shape)
+        value_grads = init_zeros_tensor(self.value.shape)
 
-        gradient = self.softmax * ( gradient - (gradient * self.softmax).sum(axis = -1, keepdims=True))
-        gradient = gradient / self.heads_dim**.5
+        for attends, (q0, q1, k0, k1) in zip(self.softmax, self.chunks):
 
-        key_t_grads = self.query.transpose(0, 1, 3, 2) @ gradient
-        query_grads = gradient @ self.key_t.transpose(0, 1, 3, 2)
+            block = gradient[:, :, :, q0:q1, :]
 
-        query_grads = query_grads.transpose(0, 2, 1, 3).reshape(B, T, C)
-        key_t_grads = key_t_grads.transpose(0, 3, 1, 2).reshape(B, T, C)
-        value_grads = value_grads.transpose(0, 2, 1, 3).reshape(B, T, C)
+            # key and value ranges overlap between query blocks so they accumulate, and
+            # every query head in a group reads the same kv head, so the group axis
+            # folds back onto that one head
+            value_grads[:, :, :, k0:k1, :] += (attends.transpose(0, 1, 2, 4, 3) @ block).sum(axis = 2, keepdims = True)
 
-        gradient = cupy.concatenate((query_grads, key_t_grads, value_grads), axis = 2)
+            block = block @ self.value[:, :, :, k0:k1, :].transpose(0, 1, 2, 4, 3)
+            block = attends * ( block - (block * attends).sum(axis = -1, keepdims=True))
+            block = block / self.heads_dim**.5
 
-        self.qkv_weight_grads += cupy.tensordot(self.input.transpose(2, 0, 1), gradient, 2) / T
-        return gradient @ self.qkv_weights.transpose()
+            key_grads[:, :, :, k0:k1, :] += (block.transpose(0, 1, 2, 4, 3) @
+                                             self.query[:, :, :, q0:q1, :]).sum(axis = 2, keepdims = True)
 
+            # query blocks are disjoint, so this writes rather than accumulates
+            query_grads[:, :, :, q0:q1, :] = block @ self.key[:, :, :, k0:k1, :]
+
+        if self.rope is not None:
+            query_grads = self.rope.backward(query_grads)
+            key_grads   = self.rope.backward(key_grads)
+
+        if self.q_norm is not None:
+            query_grads = self.q_norm.backward(query_grads)
+            key_grads   = self.k_norm.backward(key_grads)
+
+        query_grads = self._merge_heads(query_grads)
+        key_grads   = self._merge_heads(key_grads)
+        value_grads = self._merge_heads(value_grads)
+
+        if self.fused:
+            gradient = cupy.concatenate((query_grads, key_grads, value_grads), axis = 2)
+            self.qkv_weight_grads += cupy.tensordot(self.input.transpose(2, 0, 1), gradient, 2) / T
+            return gradient @ self.qkv_weights.transpose()
+
+        if self.kv_shared:
+            # one projection served as both key and value, so both paths accumulate onto it
+            key_grads = key_grads + value_grads
+
+        self.q_weight_grads += cupy.tensordot(self.input.transpose(2, 0, 1), query_grads, 2) / T
+        self.k_weight_grads += cupy.tensordot(self.input.transpose(2, 0, 1), key_grads,   2) / T
+
+        gradient = query_grads @ self.q_weights.transpose() + key_grads @ self.k_weights.transpose()
+
+        if not self.kv_shared:
+            self.v_weight_grads += cupy.tensordot(self.input.transpose(2, 0, 1), value_grads, 2) / T
+            gradient = gradient + value_grads @ self.v_weights.transpose()
+
+        return gradient
 
 class GatedFeedForward(Layer):
 
-    def __init__(self, num_channels, activation, dropout_rate = 0.0):
+    CACHED = ("input", "output", "act_output", "gate_output", "hidden_output")
+
+    def __init__(self, num_channels, activation, dropout_rate = 0.0, multiplier = 4):
         super(GatedFeedForward, self).__init__()
         
         self.activation:Layer = activation()
         self.dropout = Dropout(dropout_rate)
+
+        hidden_channels = multiplier * num_channels
         
         self.act_output = None
         self.gate_output = None
         self.hidden_output = None
 
-        self.weights1 = init_random_tensor((  num_channels, 4*num_channels)) /    num_channels**0.5
-        self.weights2 = init_random_tensor((  num_channels, 4*num_channels)) /    num_channels**0.5
-        self.weights3 = init_random_tensor((4*num_channels,   num_channels)) / (4*num_channels)**0.5
+        self.weights1 = init_random_tensor((num_channels,    hidden_channels)) / num_channels**0.5
+        self.weights2 = init_random_tensor((num_channels,    hidden_channels)) / num_channels**0.5
+        self.weights3 = init_random_tensor((hidden_channels, num_channels))    / hidden_channels**0.5
 
         self.weight_grads1   = init_zeros_tensor(self.weights1.shape)
         self.weight_moments1 = init_zeros_tensor(self.weights1.shape)
@@ -387,15 +665,9 @@ class GatedFeedForward(Layer):
         self.weight_moments2 = init_zeros_tensor(self.weights2.shape)
         self.weight_vars2    = init_zeros_tensor(self.weights2.shape)
         
-        self.weight_grads3   = init_zeros_tensor(self.weights3.shape)
-        self.weight_moments3 = init_zeros_tensor(self.weights3.shape)
-        self.weight_vars3    = init_zeros_tensor(self.weights3.shape)
-
-        self.parameters = [self.weights1,        self.weights2,        self.weights3]
-        self.gradients  = [self.weight_grads1,   self.weight_grads2,   self.weight_grads3]
-        self.moments    = [self.weight_moments1, self.weight_moments2, self.weight_moments3]
-        self.variances  = [self.weight_vars1,    self.weight_vars2,    self.weight_vars3]
-
+        self.weight_grads1 = self.register(self.weights1)
+        self.weight_grads2 = self.register(self.weights2)
+        self.weight_grads3 = self.register(self.weights3)
 
     def forward(self, input):
 
@@ -424,11 +696,17 @@ class GatedFeedForward(Layer):
 
         return act_gradient @ self.weights1.transpose() + gate_gradient @ self.weights2.transpose()
 
+    def clear_cache(self):
+        super(GatedFeedForward, self).clear_cache()
+        self.activation.clear_cache()
+        self.dropout.clear_cache()
+
     def set_eval(self, eval_mode):
         self.dropout.set_eval(eval_mode)
 
-# TODO: Add RMSnorm
 class LayerNorm(Layer):
+
+    CACHED = ("input", "output", "mean", "var", "std", "centered", "normed")
 
     def __init__(self, num_channels):
         super(LayerNorm, self).__init__()
@@ -439,24 +717,14 @@ class LayerNorm(Layer):
         self.gamma = init_zeros_tensor(num_channels) + 1
         self.beta  = init_zeros_tensor(num_channels)
 
-        self.gamma_grads   = init_zeros_tensor(num_channels)
-        self.gamma_moments = init_zeros_tensor(num_channels)
-        self.gamma_vars    = init_zeros_tensor(num_channels)
-
-        self.beta_grads   = init_zeros_tensor(num_channels)
-        self.beta_moments = init_zeros_tensor(num_channels)
-        self.beta_vars    = init_zeros_tensor(num_channels)
-
         self.mean = None
         self.var = None
         self.std = None
         self.centered = None
         self.normed = None
 
-        self.parameters = [self.gamma,         self.beta]
-        self.gradients  = [self.gamma_grads,   self.beta_grads]
-        self.moments    = [self.gamma_moments, self.beta_moments]
-        self.variances  = [self.gamma_vars,    self.beta_vars]
+        self.gamma_grads = self.register(self.gamma)
+        self.beta_grads  = self.register(self.beta)
 
     def forward(self, input):
 
@@ -487,32 +755,123 @@ class LayerNorm(Layer):
         return gradient_normed - self.centered * (cupy.mean(gradient * self.centered, axis = -1, keepdims = True) / self.std**3)
 
 
-class TransformerBlock(Layer):
+class Softcap(Layer):
 
-    def __init__(self, embed_dim, context_length, num_heads, activation, decoder = False, dropout_rate = 0.0):
-        super(TransformerBlock, self).__init__()
+    """Logit soft capping, cap * tanh(x / cap). Gemma 4 caps final logits at 30.
 
-        self.pre_attn_norm = LayerNorm(embed_dim)
-        self.attn_block = MultiHeadAttention(embed_dim, context_length, num_heads, decoder = decoder)
+    Sits between the unembedding and SoftMax. That composes with the fused
+    softmax + cross entropy gradient for free: SoftMax.backward is the identity and
+    CrossEntropy already hands back d(loss)/d(softmax input), so this layer only has
+    to apply its own tanh derivative.
+    """
 
-        self.pre_ffn_norm = LayerNorm(embed_dim)
-        self.ffn = GatedFeedForward(embed_dim, activation, dropout_rate = dropout_rate)
+    CACHED = ("input", "output", "tanh")
 
-        self.parameters = [*self.pre_attn_norm.parameters, *self.attn_block.parameters, *self.pre_ffn_norm.parameters, *self.ffn.parameters]
-        self.gradients  = [*self.pre_attn_norm.gradients,  *self.attn_block.gradients,  *self.pre_ffn_norm.gradients,  *self.ffn.gradients]
-        self.moments    = [*self.pre_attn_norm.moments,    *self.attn_block.moments,    *self.pre_ffn_norm.moments,    *self.ffn.moments]
-        self.variances  = [*self.pre_attn_norm.variances,  *self.attn_block.variances,  *self.pre_ffn_norm.variances,  *self.ffn.variances]
+    def __init__(self, cap = 30.0):
+        super(Softcap, self).__init__()
 
-    def forward(self,input):
+        self.cap = cap
+        self.tanh = None
+
+    def forward(self, input):
         self.input  = input
-        self.output = self.input  + self.attn_block.forward(self.pre_attn_norm.forward(self.input))
-        self.output = self.output + self.ffn.forward(self.pre_ffn_norm.forward(self.output))
+        self.tanh   = cupy.tanh(input / self.cap)
+        self.output = self.cap * self.tanh
         return self.output
 
     def backward(self, gradient):
-        gradient += self.pre_ffn_norm.backward(self.ffn.backward(gradient))
-        gradient += self.pre_attn_norm.backward(self.attn_block.backward(gradient))
+        return gradient * (1 - self.tanh**2)
+
+
+class TransformerBlock(Layer):
+
+    """Pre norm transformer block, optionally with Gemma's post norms.
+
+    post_norm = True gives the sandwich arrangement, a second norm on the branch
+    output before it rejoins the residual stream:
+
+        h = x + post_attn_norm(attn(pre_attn_norm(x)))
+        y = h + post_ffn_norm(ffn(pre_ffn_norm(h)))
+
+    Attention keywords (num_kv_heads, head_dim, qk_norm, rope, sliding_window,
+    kv_shared, chunk_size) pass straight through to MultiHeadAttention.
+    """
+
+    def __init__(self, embed_dim, context_length, num_heads, activation, decoder = False,
+                       dropout_rate = 0.0, norm = LayerNorm, post_norm = False, ffn_multiplier = 4,
+                       num_kv_heads = None, head_dim = None, qk_norm = False,
+                       rope = None, sliding_window = None, kv_shared = False,
+                       chunk_size = None):
+        super(TransformerBlock, self).__init__()
+
+        self.pre_attn_norm  = norm(embed_dim)
+        self.attn_block     = MultiHeadAttention(embed_dim, context_length, num_heads, decoder = decoder,
+                                                 num_kv_heads = num_kv_heads, head_dim = head_dim,
+                                                 qk_norm = qk_norm, rope = rope,
+                                                 sliding_window = sliding_window, kv_shared = kv_shared,
+                                                 chunk_size = chunk_size)
+        self.post_attn_norm = norm(embed_dim) if post_norm else None
+
+        self.pre_ffn_norm  = norm(embed_dim)
+        self.ffn           = GatedFeedForward(embed_dim, activation, dropout_rate = dropout_rate,
+                                              multiplier = ffn_multiplier)
+        self.post_ffn_norm = norm(embed_dim) if post_norm else None
+
+        self.blocks = [block for block in (self.pre_attn_norm, self.attn_block, self.post_attn_norm,
+                                           self.pre_ffn_norm,  self.ffn,        self.post_ffn_norm)
+                       if block is not None]
+
+        self.parameters = [tensor for block in self.blocks for tensor in block.parameters]
+        self.gradients  = [tensor for block in self.blocks for tensor in block.gradients]
+        self.moments    = [tensor for block in self.blocks for tensor in block.moments]
+        self.variances  = [tensor for block in self.blocks for tensor in block.variances]
+
+    def forward(self,input):
+
+        self.input = input
+
+        branch = self.attn_block.forward(self.pre_attn_norm.forward(self.input))
+        if self.post_attn_norm is not None:
+            branch = self.post_attn_norm.forward(branch)
+        self.output = self.input + branch
+
+        branch = self.ffn.forward(self.pre_ffn_norm.forward(self.output))
+        if self.post_ffn_norm is not None:
+            branch = self.post_ffn_norm.forward(branch)
+        self.output = self.output + branch
+
+        return self.output
+
+    def backward(self, gradient):
+
+        branch = gradient
+        if self.post_ffn_norm is not None:
+            branch = self.post_ffn_norm.backward(branch)
+        gradient = gradient + self.pre_ffn_norm.backward(self.ffn.backward(branch))
+
+        branch = gradient
+        if self.post_attn_norm is not None:
+            branch = self.post_attn_norm.backward(branch)
+        gradient = gradient + self.pre_attn_norm.backward(self.attn_block.backward(branch))
+
         return gradient
+
+    def clear_cache(self):
+        super(TransformerBlock, self).clear_cache()
+        for block in self.blocks:
+            block.clear_cache()
 
     def set_eval(self, eval_mode):
         self.ffn.dropout.set_eval(eval_mode)
+
+
+def gemma_layer_types(num_layers, pattern = 6):
+    """Gemma 4's local/global interleave: every pattern-th layer attends globally.
+
+    Gemma 4 31B is 60 layers at pattern 6, giving the documented 5 sliding : 1 global
+    ratio with layers 5, 11, ... 59 global. The last layer is always global so the
+    final representation has seen the whole sequence.
+    """
+    types = ["global" if (index + 1) % pattern == 0 else "sliding" for index in range(num_layers)]
+    types[-1] = "global"
+    return types
